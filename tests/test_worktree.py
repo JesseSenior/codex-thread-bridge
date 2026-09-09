@@ -70,6 +70,28 @@ async def test_readiness_launch_retains_exact_base_without_carrying_dirty_change
     assert (await bridge.get_goal(receipt["threadId"]))["goal"] is None
 
 
+@pytest.mark.parametrize("field", ["source_repository", "destination"])
+@pytest.mark.parametrize("suffix", [" ", "\t", "\n\n"], ids=["space", "tab", "newlines"])
+async def test_launch_preserves_trailing_whitespace_in_paths(bridge, repository, field, suffix):
+    from pathlib import Path
+
+    args = {**repository, field: repository[field] + suffix, "prompt": "READY"}
+    if field == "source_repository":
+        Path(repository[field]).rename(args[field])
+    receipt = await bridge.create_worktree_thread(**args)
+    assert receipt["status"] == "accepted", receipt
+    assert receipt["worktree"]["sourceRepository"] == args["source_repository"]
+    assert receipt["worktree"]["checkout"] == args["destination"]
+    assert receipt["checkoutBeforeDispatch"]["checkout"] == args["destination"]
+    assert receipt["creation"]["cwd"] == args["destination"]
+    assert (Path(args["destination"]) / "tracked").read_text() == "base\n"
+    assert (Path(args["source_repository"]) / "tracked").read_text() == "unstaged\n"
+    repeated = await bridge.create_worktree_thread(**args)
+    assert repeated["replayed"] and repeated["threadId"] == receipt["threadId"]
+    turns = (await bridge.read_thread(receipt["threadId"]))["turnsPage"]["data"]
+    assert len(turns) == 1 and turns[0]["items"][0]["text"] == "READY"
+
+
 @pytest.mark.parametrize(
     "policy",
     [

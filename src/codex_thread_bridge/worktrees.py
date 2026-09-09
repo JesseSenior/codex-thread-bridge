@@ -41,7 +41,8 @@ async def git(cwd: Path, *args: str) -> str:
         raise
     if process.returncode:
         raise WorktreeError(stderr.decode(errors="replace")[-4000:].strip())
-    return stdout.decode().strip()
+    # Remove Git's output terminator without stripping whitespace from paths.
+    return stdout.decode().removesuffix("\n")
 
 
 def canonical_path(value: str, name: str) -> Path:
