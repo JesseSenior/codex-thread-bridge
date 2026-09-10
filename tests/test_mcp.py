@@ -1,7 +1,53 @@
+import json
 import sys
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+
+async def test_mcp_forwards_json_shaped_pagination_cursors(fake_server, tmp_path):
+    fake, socket = fake_server
+    fake.cursor = lambda offset: json.dumps({"offset": offset, "scope": {"kind": "turns"}})
+    fake.offset = lambda cursor: 0 if cursor is None else json.loads(cursor)["offset"]
+    fake.threads = {
+        f"thread-{i}": {
+            "id": f"thread-{i}",
+            "cwd": str(tmp_path),
+            "status": {"type": "idle"},
+            "turns": [{"id": f"turn-{j}", "status": "completed", "items": []} for j in range(2)],
+        }
+        for i in range(2)
+    }
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "codex_thread_bridge.server",
+            "--socket",
+            str(socket),
+            "--state-dir",
+            str(tmp_path / "state"),
+        ],
+    )
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        for tool, args, page_key, expected_id in (
+            ("read_thread", {"thread_id": "thread-0", "limit": 1}, "turnsPage", "turn-0"),
+            ("list_threads", {"limit": 1}, None, "thread-1"),
+        ):
+            first = await session.call_tool(tool, args)
+            assert not first.isError
+            page = first.structuredContent[page_key] if page_key else first.structuredContent
+            cursor = page["nextCursor"]
+            second = await session.call_tool(tool, {**args, "cursor": cursor})
+            assert not second.isError, second.content
+            page = second.structuredContent[page_key] if page_key else second.structuredContent
+            assert [item["id"] for item in page["data"]] == [expected_id]
+            method = "thread/turns/list" if page_key else "thread/list"
+            assert [p["cursor"] for m, p in fake.calls if m == method and "cursor" in p] == [cursor]
+    assert not any(
+        method in {"thread/start", "thread/resume", "turn/start"} for method, _ in fake.calls
+    )
 
 
 async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_path):

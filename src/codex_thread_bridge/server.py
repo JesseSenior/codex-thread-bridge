@@ -125,17 +125,25 @@ def make_server(bridge: Bridge):
 
     @mcp.tool(annotations=READ)
     async def list_threads(
-        cwd: str | None = None, limit: int = 20, cursor: str | None = None
+        cwd: str | None = None, limit: int = 20, cursor: str = ""
     ) -> dict[str, Any]:
-        """List unarchived backend threads without loading them. Project IDs are backend IDs."""
-        return await bridge.list_threads(cwd, limit, cursor)
+        """List unarchived backend threads without loading them. Omit cursor for the first page.
+
+        Project IDs are backend IDs. Pass a returned cursor as its exact string, not null.
+        """
+        return await bridge.list_threads(cwd, limit, cursor or None)
 
     @mcp.tool(annotations=READ)
     async def read_thread(
-        thread_id: str, limit: int = 10, cursor: str | None = None, max_text_chars: int = 4000
+        thread_id: str, limit: int = 10, cursor: str = "", max_text_chars: int = 4000
     ) -> dict[str, Any]:
-        """Read metadata and one newest-first turn page, without resuming; truncation is marked."""
-        return await bridge.read_thread(thread_id, limit, cursor, max_text_chars)
+        """Read metadata and one newest-first turn page, without resuming; truncation is marked.
+
+        Omit cursor for the first page; pass a returned cursor as its exact string, not null.
+        """
+        # FastMCP pre-parses JSON-shaped nullable strings. A plain str annotation
+        # preserves opaque JSON cursor bytes; the empty default means first page.
+        return await bridge.read_thread(thread_id, limit, cursor or None, max_text_chars)
 
     @mcp.tool(annotations=READ)
     async def wait_thread(

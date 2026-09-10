@@ -64,6 +64,10 @@ API key is needed; the existing App Server owns its authentication and model usa
 
 Text limits apply to display content such as messages, previews, and summaries.
 Pagination cursors, IDs, paths, and other protocol fields are returned unchanged.
+For the first page, omit `cursor`. For later pages, pass `nextCursor` as the exact
+string returned, even when it looks like JSON. The MCP cursor argument accepts a
+string, not `null`; an empty string also selects the first page. Restart the MCP
+server and rediscover its schemas after upgrading to this cursor handling.
 
 Client-rendered tool names include the configured MCP server namespace. Tool
 arguments and receipts are this bridge's API, not a drop-in copy of native Desktop
