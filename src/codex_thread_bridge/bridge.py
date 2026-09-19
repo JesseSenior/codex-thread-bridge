@@ -1,507 +1,371 @@
-"""Tool behavior, independent of MCP transport and the installed client."""
+"""Stateless task operations against one existing remote App Server."""
 
 import asyncio
+import base64
+import hashlib
+import json
 from pathlib import Path
 
-from .ledger import Ledger
-from .rpc import AppServer, RpcError
-from .worktrees import Worktree, WorktreeError
+from .rpc import AppServer, RpcError, TransportError
+from .settings import SettingsError, saved_settings, verify_settings
+
+PINNED_SECTION_ID = "01984de2-8f74-7c91-a3b2-5c5e937cf318"
+DISPLAY_FIELDS = frozenset({"text", "preview", "summary", "objective", "aggregatedOutput"})
 
 
-def nonempty(value: str, name: str, maximum: int = 100_000):
+def nonempty(value, name, maximum=100_000):
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ValueError(f"{name} must contain 1–{maximum} characters")
 
 
-def absolute_directory(cwd: str):
+def page_size(limit):
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+
+
+def existing_directory(cwd):
     path = Path(cwd)
     if not path.is_absolute() or not path.is_dir():
-        raise ValueError("cwd must be an existing absolute directory on the App Server host")
+        raise ValueError("cwd must be an existing absolute directory on this remote host")
     return str(path.resolve())
 
 
-DISPLAY_FIELDS = frozenset({"text", "preview", "summary", "objective", "aggregatedOutput"})
-
-
-def validate_sandbox_policy(policy: dict):
-    fields = {
-        "readOnly": {"type", "networkAccess"},
-        "dangerFullAccess": {"type"},
-        "workspaceWrite": {
-            "type",
-            "networkAccess",
-            "writableRoots",
-            "excludeTmpdirEnvVar",
-            "excludeSlashTmp",
-        },
-    }
-    if set(policy) != fields.get(policy.get("type")):
-        raise ValueError("Expected sandbox policy must contain all and only its protocol fields")
-    for key in ("networkAccess", "excludeTmpdirEnvVar", "excludeSlashTmp"):
-        if key in policy and type(policy[key]) is not bool:
-            raise ValueError("Expected sandbox policy flags must be booleans")
-    if "writableRoots" in policy and (
-        not isinstance(policy["writableRoots"], list)
-        or any(not isinstance(p, str) or not Path(p).is_absolute() for p in policy["writableRoots"])
-    ):
-        raise ValueError("Expected sandbox policy writableRoots must be absolute paths")
-
-
-def clipped(value, limit: int, *, display_text: bool = False):
-    """Bound display content while preserving opaque protocol fields verbatim."""
+def clipped(value, limit, *, display_text=False):
     if display_text and isinstance(value, str) and len(value) > limit:
         return value[:limit] + f"\n[truncated; original length {len(value)} characters]"
     if isinstance(value, list):
         return [clipped(item, limit, display_text=display_text) for item in value]
     if isinstance(value, dict):
-        return {
-            key: clipped(item, limit, display_text=key in DISPLAY_FIELDS)
-            for key, item in value.items()
-        }
+        return {k: clipped(v, limit, display_text=k in DISPLAY_FIELDS) for k, v in value.items()}
     return value
 
 
 class Bridge:
-    def __init__(self, rpc: AppServer, ledger: Ledger):
+    def __init__(self, rpc: AppServer):
         self.rpc = rpc
-        self.ledger = ledger
         self._mutation_lock = asyncio.Lock()
 
-    async def capabilities(self):
+    async def diagnostics(self):
         await self.rpc.connect()
-        return {
-            "server": self.rpc.info,
-            "transport": "same-host Unix WebSocket",
-            "socket": str(self.rpc.socket_path),
-            "capabilities": {
-                "createThread": True,
-                "sendMessage": True,
-                "listReadWait": True,
-                "goalRead": True,
-                "goalSet": False,
-                "desktopManagedWorktrees": False,
-                "bridgeManagedWorktrees": True,
-                "desktopProjectRegistry": False,
-                "clientSideToolsAndApprovals": False,
-            },
-            "desktopVisibility": "Observed on Codex 0.153.4 with an existing project checkout; "
-            "verify actual Desktop listing for each launch. Backend project IDs are separate.",
-        }
+        return {"server": self.rpc.info, "socket": str(self.rpc.socket_path), "stateless": True}
 
-    async def _mutate(
-        self, request_id, method, params, action, *, validate_fresh=None, legacy_params=None
-    ):
+    async def _mutate(self, action, **known):
+        result = {"status": "accepted", **known}
         async with self._mutation_lock:
-            retained = self.ledger.lookup(request_id, method, params, legacy_params=legacy_params)
-            if retained is not None:
-                return {**retained, "replayed": True}
-            if validate_fresh is not None:
-                validate_fresh()
-            fresh, receipt = self.ledger.begin(
-                request_id, method, params, legacy_params=legacy_params
-            )
-            if not fresh:
-                return {**receipt, "replayed": True}
+
+            async def call(method, params):
+                result["method"] = method
+                return await self.rpc.call(method, params)
+
             try:
-                await action(receipt)
-                receipt["status"] = "accepted"
+                await action(call, result)
             except RpcError as error:
-                receipt.update(status="failed", error=str(error), rpcError=error.error)
-            except WorktreeError as error:
-                receipt.update(status="failed", error=str(error))
-            except asyncio.CancelledError:
-                self.ledger.save({**receipt, "status": "outcome_unknown"})
-                raise
-            except Exception as error:
-                receipt.update(status="outcome_unknown", error=f"{type(error).__name__}: {error}")
-            return self.ledger.save(receipt)
+                result.update(status="failed", error=str(error), rpcError=error.error)
+            except TransportError as error:
+                result.update(
+                    status="outcome_unknown" if error.may_have_been_sent else "failed",
+                    error=str(error),
+                    recovery="Do not resend automatically. Inspect the task and its history.",
+                )
+            except SettingsError as error:
+                result.update(status="failed", error=str(error), messageSent=False)
+        return result
 
     async def create_thread(
         self,
-        request_id: str,
-        cwd: str,
-        prompt: str | None = None,
-        title: str | None = None,
-        sandbox: str = "read-only",
-        model: str | None = None,
-        app_server_project_id: str | None = None,
+        cwd,
+        prompt=None,
+        title=None,
+        environment=None,
+        model=None,
+        thinking=None,
+        sandbox=None,
+        approvalPolicy=None,
+        permissions=None,
     ):
-        nonempty(cwd, "cwd")
-        if not Path(cwd).is_absolute():
-            raise ValueError("cwd must be an existing absolute directory on the App Server host")
-        if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
-            raise ValueError("Unsupported sandbox")
-        for name, value in [("prompt", prompt), ("title", title), ("model", model)]:
+        if environment is not None:
+            if environment.get("type") == "worktree":
+                raise ValueError("Worktree support is not available. Use an existing directory.")
+            if environment != {"type": "local"}:
+                raise ValueError("Only environment {type: local} is supported")
+        directory = await asyncio.to_thread(existing_directory, cwd)
+        for key, value in {"prompt": prompt, "title": title, "model": model}.items():
             if value is not None:
-                nonempty(value, name, 100_000 if name == "prompt" else 500)
-        params = {"cwd": cwd, "sandbox": sandbox, "approvalPolicy": "never", "ephemeral": False}
-        if model is not None:
-            params["model"] = model
-        if app_server_project_id is not None:
-            nonempty(app_server_project_id, "app_server_project_id", 128)
-            params["projectId"] = app_server_project_id
-
-        launch_params = dict(params)
-        request_params = {**params, "prompt": prompt, "title": title}
-
-        def legacy_params():
-            # Old receipts hashed a resolved cwd; only legacy lookups may use this form.
-            return {**request_params, "cwd": str(Path(cwd).resolve())}
-
-        def validate_fresh():
-            # The fingerprint uses the supplied path, not mutable symlink resolution.
-            launch_params["cwd"] = absolute_directory(cwd)
-
-        async def action(receipt):
-            if app_server_project_id is not None:
-                await self.rpc.call("project/read", {"projectId": app_server_project_id})
-            created = await self.rpc.call("thread/start", launch_params)
-            thread_id = created["thread"]["id"]
-            receipt.update(threadId=thread_id, creation=created)
-            self.ledger.save(receipt)  # Retain the ID even if naming or the first turn fails.
-            actual = created.get("sandbox", {}).get("type")
-            expected = {
-                "read-only": "readOnly",
-                "workspace-write": "workspaceWrite",
-                "danger-full-access": "dangerFullAccess",
-            }[sandbox]
-            if (
-                created.get("cwd") != launch_params["cwd"]
-                or created.get("approvalPolicy") != "never"
-                or actual != expected
-            ):
-                raise RpcError(
-                    "thread/start",
-                    {
-                        "code": "environment_mismatch",
-                        "message": "Created environment differs; initial prompt withheld. "
-                        "Inspect creation receipt. The thread remains retained.",
-                    },
-                )
-            if title is not None:
-                await self.rpc.call("thread/name/set", {"threadId": thread_id, "name": title})
-                receipt["title"] = title
-                self.ledger.save(receipt)
-            if prompt is not None:
-                turn = await self.rpc.call(
-                    "turn/start",
-                    {
-                        "threadId": thread_id,
-                        "input": [{"type": "text", "text": prompt}],
-                    },
-                )
-                receipt["turnId"] = turn["turn"]["id"]
-            receipt["desktopProjectAssociation"] = "unverified; check Desktop listing"
-
-        return await self._mutate(
-            request_id,
-            "create_thread",
-            request_params,
-            action,
-            validate_fresh=validate_fresh,
-            legacy_params=legacy_params,
-        )
-
-    async def create_worktree_thread(
-        self,
-        request_id: str,
-        source_repository: str,
-        starting_revision: str,
-        destination: str,
-        worktree_mode: str,
-        sandbox: str,
-        expected_sandbox_policy: dict,
-        prompt: str | None = None,
-        title: str | None = None,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-        app_server_project_id: str | None = None,
-    ):
-        if worktree_mode != "bridge-managed-retained":
-            raise ValueError("Explicit bridge-managed-retained worktree ownership is required")
-        validate_sandbox_policy(expected_sandbox_policy)
-        sandbox_types = {
-            "read-only": "readOnly",
-            "workspace-write": "workspaceWrite",
-            "danger-full-access": "dangerFullAccess",
-        }
-        if (
-            sandbox not in sandbox_types
-            or expected_sandbox_policy.get("type") != sandbox_types[sandbox]
-        ):
-            raise ValueError("sandbox and expected_sandbox_policy.type must agree")
-        for name, value in [
-            ("source_repository", source_repository),
-            ("starting_revision", starting_revision),
-            ("destination", destination),
-            ("prompt", prompt),
-            ("title", title),
-            ("model", model),
-            ("reasoning_effort", reasoning_effort),
-            ("app_server_project_id", app_server_project_id),
-        ]:
-            if value is not None:
-                nonempty(value, name)
-        params = {
-            "source_repository": source_repository,
-            "starting_revision": starting_revision,
-            "destination": destination,
-            "worktree_mode": worktree_mode,
-            "sandbox": sandbox,
-            "expected_sandbox_policy": expected_sandbox_policy,
-            "prompt": prompt,
-            "title": title,
+                nonempty(value, key)
+        if sandbox is not None and permissions is not None:
+            raise ValueError("sandbox and permissions cannot be combined")
+        params = {"cwd": directory, "ephemeral": False}
+        for key, value in {
             "model": model,
-            "reasoning_effort": reasoning_effort,
-            "app_server_project_id": app_server_project_id,
-        }
+            "sandbox": sandbox,
+            "approvalPolicy": approvalPolicy,
+            "permissions": permissions,
+        }.items():
+            if value is not None:
+                params[key] = value
+        if thinking is not None:
+            params["config"] = {"model_reasoning_effort": thinking}
 
-        async def action(receipt):
-            def checkpoint(phase, **fields):
-                receipt.update(phase=phase, **fields)
-                self.ledger.save(receipt)
-
-            checkpoint(
-                "validating",
-                recoveryRequired=True,
-                recovery="Inspect this receipt, the destination and Git worktree list, and "
-                "backend/Desktop tasks before manual recovery. Retain all artifacts; do not "
-                "retry with a new request ID. Unknown thread/turn outcomes need reconciliation.",
-                requestedCheckout=destination,
-                initialPrompt={"state": "not_sent" if prompt is not None else "not_requested"},
-                desktopProjectAssociation={
-                    "status": "unverified",
-                    "sourceRepository": source_repository,
-                },
-            )
-            worktree = await Worktree.validate(source_repository, starting_revision, destination)
-            if app_server_project_id is not None:
-                await self.rpc.call("project/read", {"projectId": app_server_project_id})
-            checkpoint("reserving_destination", worktree=worktree.receipt())
-            worktree.reserve()
-            receipt["worktree"]["state"] = "reserved"
-            checkpoint("creating_worktree")
-            await worktree.create()
-            receipt["worktree"]["state"] = "registered"
-            checkpoint("checking_out_worktree")
-            await worktree.checkout()
-            receipt["worktree"]["state"] = "created"
-            checkpoint("checking_worktree")
-            actual = await worktree.inspect()
-            receipt["worktree"].update(actual)
-            checkpoint("worktree_checked")
-            if not worktree.matches(actual):
-                raise WorktreeError("Worktree placement/base mismatch; initial prompt withheld")
-
-            launch = {
-                "cwd": str(worktree.destination),
-                "sandbox": sandbox,
-                "approvalPolicy": "never",
-                "ephemeral": False,
-                "runtimeWorkspaceRoots": [str(worktree.destination)],
-            }
-            if model is not None:
-                launch["model"] = model
-            if reasoning_effort is not None:
-                launch["config"] = {"model_reasoning_effort": reasoning_effort}
-            if app_server_project_id is not None:
-                launch["projectId"] = app_server_project_id
-            checkpoint("creating_thread")
-            created = await self.rpc.call("thread/start", launch)
-            checkpoint(
-                "checking_environment",
-                threadId=created["thread"]["id"],
-                creation=created,
-                permissionReceipt={
-                    key: created.get(key)
-                    for key in (
-                        "approvalPolicy",
-                        "sandbox",
-                        "activePermissionProfile",
-                        "runtimeWorkspaceRoots",
-                    )
-                },
-                desktopProjectAssociation={
-                    "status": "unverified",
-                    "sourceRepository": source_repository,
-                    "checkout": created.get("cwd"),
-                    "appServerProjectId": created["thread"].get("projectId"),
-                },
-            )
-            if (
-                created.get("cwd") != str(worktree.destination)
-                or created["thread"].get("cwd") != str(worktree.destination)
-                or created.get("runtimeWorkspaceRoots") != [str(worktree.destination)]
-                or created.get("approvalPolicy") != "never"
-                or created.get("sandbox") != expected_sandbox_policy
-                or (model is not None and created.get("model") != model)
-                or (
-                    reasoning_effort is not None
-                    and created.get("reasoningEffort") != reasoning_effort
-                )
-                or (
-                    app_server_project_id is not None
-                    and created["thread"].get("projectId") != app_server_project_id
-                )
-            ):
-                raise WorktreeError(
-                    "Created environment differs; initial prompt withheld. Inspect creation receipt"
-                )
+        async def action(call, result):
+            creation = await call("thread/start", params)
+            tid = creation["thread"]["id"]
+            result.update(threadId=tid, creation=creation)
+            expected = {k: params[k] for k in ("cwd", "model", "approvalPolicy") if k in params}
+            if any(creation.get(k) != value for k, value in expected.items()):
+                raise SettingsError("Created settings differ from the request; no prompt was sent")
+            if sandbox is not None:
+                sandbox_type = {
+                    "read-only": "readOnly",
+                    "workspace-write": "workspaceWrite",
+                    "danger-full-access": "dangerFullAccess",
+                }[sandbox]
+                if creation.get("sandbox", {}).get("type") != sandbox_type:
+                    raise SettingsError("Created sandbox differs; no prompt was sent")
+            if permissions is not None:
+                if (creation.get("activePermissionProfile") or {}).get("id") != permissions:
+                    raise SettingsError("Created permission profile differs; no prompt was sent")
+            if thinking is not None and creation.get("reasoningEffort") != thinking:
+                raise SettingsError("Created reasoning effort differs; no prompt was sent")
             if title is not None:
-                checkpoint("naming_thread")
-                await self.rpc.call(
-                    "thread/name/set", {"threadId": receipt["threadId"], "name": title}
-                )
-                checkpoint("thread_named", title=title)
-            # Thread startup and naming can take time; recheck placement just before dispatch.
-            actual = await worktree.inspect()
-            checkpoint("checking_before_dispatch", checkoutBeforeDispatch=actual)
-            if not worktree.matches(actual):
-                raise WorktreeError(
-                    "Worktree changed during thread startup; initial prompt withheld"
-                )
+                await call("thread/name/set", {"threadId": tid, "name": title})
             if prompt is not None:
-                checkpoint("dispatching_initial_prompt", initialPrompt={"state": "outcome_unknown"})
-                turn = await self.rpc.call(
-                    "turn/start",
-                    {
-                        "threadId": receipt["threadId"],
-                        "input": [{"type": "text", "text": prompt}],
-                    },
-                )
-                checkpoint(
-                    "initial_prompt_accepted",
-                    turnId=turn["turn"]["id"],
-                    initialPrompt={"state": "accepted"},
-                )
-            checkpoint("complete", recoveryRequired=False)
+                turn = await call("turn/start", {"threadId": tid, "input": self._input(prompt)})
+                result["turnId"] = turn["turn"]["id"]
 
-        return await self._mutate(request_id, "create_worktree_thread", params, action)
+        return await self._mutate(action)
 
-    async def send_message_to_thread(self, request_id: str, thread_id: str, message: str):
-        nonempty(thread_id, "thread_id", 128)
-        nonempty(message, "message")
+    @staticmethod
+    def _input(prompt):
+        return [{"type": "text", "text": prompt}]
 
-        async def action(receipt):
-            receipt["threadId"] = thread_id
-            self.ledger.save(receipt)
-            state = await self.rpc.call("thread/read", {"threadId": thread_id})
-            if state["thread"].get("status", {}).get("type") == "active":
-                raise RpcError(
-                    "thread/read",
-                    {
-                        "code": "thread_busy",
-                        "message": "Thread is active; message withheld. Wait for completion.",
-                    },
-                )
-            # Resume is an explicit part of messaging, never part of discovery.
-            # No cwd, model, sandbox, or reasoning overrides are supplied.
-            resumed = await self.rpc.call(
-                "thread/resume",
-                {
-                    "threadId": thread_id,
-                    "excludeTurns": True,
-                },
-            )
-            receipt["resumed"] = resumed
-            self.ledger.save(receipt)
-            if resumed.get("approvalPolicy") != "never":
-                raise RpcError(
-                    "thread/resume",
-                    {
-                        "code": "unsupported_approval_policy",
-                        "message": "Interactive approvals unsupported; message withheld. "
-                        "Continue the thread in Desktop.",
-                    },
-                )
-            turn = await self.rpc.call(
-                "turn/start",
-                {
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": message}],
-                },
-            )
-            receipt["turnId"] = turn["turn"]["id"]
-
-        return await self._mutate(
-            request_id,
-            "send_message_to_thread",
-            {"threadId": thread_id, "message": message},
-            action,
-        )
-
-    async def get_goal(self, thread_id: str):
-        nonempty(thread_id, "thread_id", 128)
-        return clipped(await self.rpc.call("thread/goal/get", {"threadId": thread_id}), 4000)
-
-    async def list_threads(self, cwd=None, limit=20, cursor=None):
-        if not 1 <= limit <= 100:
-            raise ValueError("limit must be between 1 and 100")
-        params = {"limit": limit, "useStateDbOnly": True}
-        if cwd is not None:
-            params["cwd"] = absolute_directory(cwd)
-        if cursor is not None:
-            params["cursor"] = cursor
-        return clipped(await self.rpc.call("thread/list", params), 4000)
-
-    async def read_thread(self, thread_id: str, limit=10, cursor=None, max_text_chars=4000):
-        nonempty(thread_id, "thread_id", 128)
-        if not 1 <= limit <= 100 or not 100 <= max_text_chars <= 20_000:
-            raise ValueError("limit must be 1–100 and max_text_chars must be 100–20000")
-        metadata = await self.rpc.call("thread/read", {"threadId": thread_id})
-        params = {"threadId": thread_id, "limit": limit, "itemsView": "full"}
-        if cursor is not None:
-            params["cursor"] = cursor
-        page = await self.rpc.call("thread/turns/list", params)
-        return clipped({"thread": metadata["thread"], "turnsPage": page}, max_text_chars)
-
-    async def wait_thread(self, thread_id: str, turn_id: str, timeout_seconds=20):
-        nonempty(thread_id, "thread_id", 128)
-        nonempty(turn_id, "turn_id", 128)
-        if not 0 <= timeout_seconds <= 50:
-            raise ValueError("timeout_seconds must be between 0 and 50")
-        latest = None
-
-        async def inspect():
-            # Search recent turns only; never confuse a different completed turn with the target.
-            page = await self.rpc.call(
-                "thread/turns/list",
-                {
-                    "threadId": thread_id,
-                    "limit": 100,
-                    "itemsView": "summary",
-                },
-            )
-            return next((turn for turn in page["data"] if turn["id"] == turn_id), None)
-
-        if timeout_seconds == 0:
-            latest = await inspect()
-        else:
-            try:
-                async with asyncio.timeout(timeout_seconds):
-                    while True:
-                        latest = await inspect()
-                        if latest and latest.get("status") in {
-                            "completed",
-                            "failed",
-                            "interrupted",
-                        }:
-                            break
-                        await asyncio.sleep(0.5)
-            except TimeoutError:
-                pass
-        terminal = latest is not None and latest.get("status") in {
-            "completed",
-            "failed",
-            "interrupted",
-        }
-        return clipped(
+    async def _latest(self, thread_id, items="summary"):
+        page = await self.rpc.call(
+            "thread/turns/list",
             {
                 "threadId": thread_id,
-                "turnId": turn_id,
-                "timedOut": not terminal,
-                "turn": latest,
-                "observation": "found" if latest else "not observed in latest 100 turns",
+                "limit": 1,
+                "itemsView": items,
+            },
+        )
+        return next(iter(page["data"]), None)
+
+    async def send_message_to_thread(self, threadId, prompt):
+        nonempty(threadId, "threadId", 128)
+        nonempty(prompt, "prompt")
+
+        async def action(call, result):
+            thread = (await call("thread/read", {"threadId": threadId}))["thread"]
+            if thread["status"]["type"] == "notLoaded":
+                try:
+                    params, sandbox = await asyncio.to_thread(saved_settings, thread)
+                except OSError as error:
+                    raise SettingsError(f"Cannot read saved task settings: {error}") from error
+                resumed = await call("thread/resume", params)
+                result["settings"] = {k: v for k, v in resumed.items() if k != "thread"}
+                verify_settings(resumed, params, sandbox)
+                thread = resumed["thread"]
+            if thread["status"]["type"] == "active":
+                turn = await self._latest(threadId)
+                if turn is None or turn["status"] != "inProgress":
+                    raise SettingsError("Task changed while reading it; message was not sent")
+                result["turnId"] = turn["id"]
+                steered = await call(
+                    "turn/steer",
+                    {
+                        "threadId": threadId,
+                        "expectedTurnId": turn["id"],
+                        "input": self._input(prompt),
+                    },
+                )
+                result.update(turnId=steered["turnId"], delivery="steered")
+            else:
+                started = await call(
+                    "turn/start",
+                    {
+                        "threadId": threadId,
+                        "input": self._input(prompt),
+                    },
+                )
+                result.update(turnId=started["turn"]["id"], delivery="started")
+
+        return await self._mutate(action, threadId=threadId)
+
+    async def list_projects(self, limit=20, cursor=None):
+        page_size(limit)
+        params = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        page = await self.rpc.call("project/list", params)
+        if not page["data"] and not cursor:
+            raise ValueError(
+                "Desktop required: this App Server exposes no project records. Use Desktop "
+                "to inspect its saved project catalog, or create_thread with an explicit cwd. "
+                "An empty catalog does not establish whether Desktop is connected."
+            )
+        return page
+
+    async def list_threads(self, limit=20, cursor=None, cwd=None, archived=False):
+        page_size(limit)
+        params = {"limit": limit, "archived": archived, "useStateDbOnly": True}
+        if cursor:
+            params["cursor"] = cursor
+        if cwd is not None:
+            params["cwd"] = cwd
+        return clipped(await self.rpc.call("thread/list", params), 4000)
+
+    async def read_thread(self, threadId, turnLimit=10, cursor=None, maxOutputCharsPerItem=4000):
+        nonempty(threadId, "threadId", 128)
+        page_size(turnLimit)
+        if not 100 <= maxOutputCharsPerItem <= 20_000:
+            raise ValueError("maxOutputCharsPerItem must be between 100 and 20000")
+        thread = (await self.rpc.call("thread/read", {"threadId": threadId}))["thread"]
+        params = {"threadId": threadId, "limit": turnLimit, "itemsView": "full"}
+        if cursor:
+            params["cursor"] = cursor
+        page = await self.rpc.call("thread/turns/list", params)
+        return clipped({"thread": thread, "turnsPage": page}, maxOutputCharsPerItem)
+
+    async def set_thread_title(self, threadId, title):
+        nonempty(threadId, "threadId", 128)
+        nonempty(title, "title", 500)
+
+        async def action(call, result):
+            await call("thread/name/set", {"threadId": threadId, "name": title})
+            result["title"] = title
+
+        return await self._mutate(action, threadId=threadId)
+
+    async def set_thread_pinned(self, threadId, pinned):
+        nonempty(threadId, "threadId", 128)
+
+        async def action(call, result):
+            await call(
+                "thread/section/move",
+                {
+                    "threadId": threadId,
+                    "sectionId": PINNED_SECTION_ID if pinned else None,
+                },
+            )
+            result["pinned"] = pinned
+
+        return await self._mutate(action, threadId=threadId)
+
+    async def set_thread_archived(self, threadId, archived):
+        nonempty(threadId, "threadId", 128)
+
+        async def action(call, result):
+            if archived:
+                thread = (await call("thread/read", {"threadId": threadId}))["thread"]
+                if thread["status"]["type"] == "active":
+                    raise SettingsError("Cannot archive a running task. Wait for it to finish.")
+            await call("thread/archive" if archived else "thread/unarchive", {"threadId": threadId})
+            result["archived"] = archived
+
+        return await self._mutate(action, threadId=threadId)
+
+    def _cursor_scope(self, thread_id):
+        return {"v": 1, "host": str(self.rpc.socket_path.resolve()), "threadId": thread_id}
+
+    def _decode_cursor(self, cursor, thread_id):
+        try:
+            value = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+            if not isinstance(value, dict):
+                raise ValueError
+            if any(value.get(k) != v for k, v in self._cursor_scope(thread_id).items()):
+                raise ValueError
+            if not isinstance(value["digest"], str):
+                raise ValueError
+            return value["digest"]
+        except (ValueError, KeyError, TypeError, UnicodeError) as error:
+            raise ValueError("Invalid wait cursor for this host or task") from error
+
+    async def _snapshot(self, thread_id):
+        thread = (await self.rpc.call("thread/read", {"threadId": thread_id}))["thread"]
+        turn = await self._latest(thread_id, "full")
+        status = thread["status"]
+        flags = status.get("activeFlags", [])
+        requests = [
+            m["method"]
+            for m in self.rpc.interactions.values()
+            if m.get("params", {}).get("threadId") == thread_id
+        ]
+        if "waitingOnApproval" in flags or "waitingOnUserInput" in flags or requests:
+            outcome = "interaction_required"
+        elif status["type"] == "active":
+            outcome = "running"
+        elif turn is not None and turn["status"] in {"failed", "interrupted"}:
+            outcome = turn["status"]
+        elif status["type"] == "systemError":
+            outcome = "failed"
+        elif status["type"] != "active" and (turn is None or turn["status"] == "completed"):
+            outcome = "completed"
+        else:
+            outcome = "running"
+        snapshot = clipped(
+            {
+                "threadId": thread_id,
+                "outcome": outcome,
+                "status": status,
+                "turn": turn,
+                "pendingMethods": sorted(set(requests)),
             },
             4000,
         )
+        digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+        cursor = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    **self._cursor_scope(thread_id),
+                    "digest": digest,
+                },
+                sort_keys=True,
+            ).encode()
+        ).decode()
+        return {**snapshot, "cursor": cursor}, digest
+
+    async def wait_threads(self, targets, timeoutMs=20_000):
+        if not 1 <= len(targets) <= 8:
+            raise ValueError("targets must contain 1 to 8 tasks")
+        if not 0 <= timeoutMs <= 120_000:
+            raise ValueError("timeoutMs must be between 0 and 120000")
+        ids = [t["threadId"] for t in targets]
+        if len(ids) != len(set(ids)):
+            raise ValueError("targets must contain distinct task IDs")
+        cursors = {}
+        for target in targets:
+            nonempty(target["threadId"], "threadId", 128)
+            if target.get("afterCursor"):
+                cursors[target["threadId"]] = self._decode_cursor(
+                    target["afterCursor"],
+                    target["threadId"],
+                )
+        end = asyncio.get_running_loop().time() + timeoutMs / 1000
+        while True:
+            results = await asyncio.gather(
+                *(self._snapshot(tid) for tid in ids), return_exceptions=True
+            )
+            snapshots, errors, ready = [], [], False
+            for tid, result in zip(ids, results, strict=True):
+                if isinstance(result, Exception):
+                    error = {"threadId": tid, "error": str(result)}
+                    if isinstance(result, RpcError):
+                        error["rpcError"] = result.error
+                    errors.append(error)
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+                snapshot, digest = result
+                unchanged = cursors.get(tid) == digest
+                if unchanged:
+                    snapshot.pop("turn", None)
+                snapshot["unchanged"] = unchanged
+                snapshots.append(snapshot)
+                ready |= not unchanged and snapshot["outcome"] != "running"
+            remaining = end - asyncio.get_running_loop().time()
+            if ready or errors or remaining <= 0:
+                return {
+                    "threads": snapshots,
+                    "errors": errors,
+                    "timedOut": not ready and not errors and timeoutMs > 0,
+                }
+            await asyncio.sleep(min(0.25, remaining))

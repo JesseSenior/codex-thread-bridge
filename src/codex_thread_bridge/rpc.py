@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.client import unix_connect
+from websockets.exceptions import ConnectionClosed
 
 from . import __version__
 
@@ -15,11 +16,15 @@ class RpcError(Exception):
     def __init__(self, method: str, error: dict[str, Any]):
         self.method = method
         self.error = error
-        super().__init__(f"{method}: {error.get('message', error)}")
+        super().__init__(f"{method}: {json.dumps(error, ensure_ascii=False)}")
 
 
 class TransportError(Exception):
     """A request may have reached the server. Mutations must not be retried."""
+
+    def __init__(self, message, *, may_have_been_sent=True):
+        self.may_have_been_sent = may_have_been_sent
+        super().__init__(message)
 
 
 class AppServer:
@@ -32,6 +37,7 @@ class AppServer:
         self._counter = 0
         self._connect_lock = asyncio.Lock()
         self.info: dict[str, Any] = {}
+        self.interactions: dict[int | str, dict[str, Any]] = {}
 
     async def connect(self):
         async with self._connect_lock:
@@ -70,20 +76,23 @@ class AppServer:
                 message = json.loads(raw)
                 if "method" in message:
                     if "id" in message:
-                        # No silent approvals or fake results for client-side tools.
-                        await ws.send(
-                            json.dumps(
-                                {
-                                    "id": message["id"],
-                                    "error": {
-                                        "code": -32601,
-                                        "message": "Unsupported client action; "
-                                        "continue this task in Desktop",
-                                    },
-                                }
+                        # The server retains this request for Desktop to answer.
+                        # An error response would reject it and change the task.
+                        self.interactions[message["id"]] = message
+                    elif message["method"] == "serverRequest/resolved":
+                        self.interactions.pop(message.get("params", {}).get("requestId"), None)
+                    elif message["method"] == "turn/completed":
+                        params = message.get("params", {})
+                        turn_id = params.get("turn", {}).get("id")
+                        self.interactions = {
+                            ident: request
+                            for ident, request in self.interactions.items()
+                            if (
+                                request.get("params", {}).get("threadId"),
+                                request.get("params", {}).get("turnId"),
                             )
-                        )
-                    # Reads and waits query the server; no unbounded event history.
+                            != (params.get("threadId"), turn_id)
+                        }
                     continue
                 future = self._pending.get(message.get("id"))
                 if future is not None and not future.done():
@@ -108,7 +117,7 @@ class AppServer:
         try:
             await ws.send(json.dumps({"id": ident, "method": method, "params": params}))
             message = await asyncio.wait_for(future, self.timeout)
-        except (OSError, TimeoutError) as error:
+        except (OSError, TimeoutError, ConnectionClosed) as error:
             raise TransportError(f"{method}: response unavailable; do not resend") from error
         finally:
             self._pending.pop(ident, None)
@@ -121,7 +130,13 @@ class AppServer:
         return message["result"]
 
     async def call(self, method: str, params: dict[str, Any]):
-        await self.connect()
+        try:
+            await self.connect()
+        except (OSError, TimeoutError, ConnectionClosed, TransportError) as error:
+            raise TransportError(
+                f"App Server unavailable at {self.socket_path}: {error}; {method} was not sent",
+                may_have_been_sent=False,
+            ) from error
         # Reconnect before a new request, never retry an already-sent request.
         return await self._request(method, params)
 
@@ -134,3 +149,4 @@ class AppServer:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reader
             self._reader = None
+        self.interactions.clear()

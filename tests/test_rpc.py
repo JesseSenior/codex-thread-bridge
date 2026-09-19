@@ -66,3 +66,56 @@ async def test_timeout_does_not_retry_request():
             finally:
                 stop.set()
                 await client.close()
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["item/tool/call", "item/tool/requestUserInput", "item/commandExecution/requestApproval"],
+)
+@pytest.mark.parametrize("resolution", ["serverRequest/resolved", "turn/completed"])
+async def test_interactions_are_not_answered_and_clear_on_resolution(method, resolution):
+    responses = []
+
+    async def handler(ws):
+        async for raw in ws:
+            message = json.loads(raw)
+            if "method" not in message:
+                responses.append(message)
+                continue
+            if message["method"] == "initialize":
+                await ws.send(json.dumps({"id": message["id"], "result": {}}))
+            elif message["method"] == "thread/resume":
+                await ws.send(
+                    json.dumps(
+                        {
+                            "id": "pending-request",
+                            "method": method,
+                            "params": {"threadId": "thread-1", "turnId": "turn-1"},
+                        }
+                    )
+                )
+                await ws.send(json.dumps({"id": message["id"], "result": {}}))
+            elif message["method"] == "thread/read":
+                params = (
+                    {"threadId": "thread-1", "requestId": "pending-request"}
+                    if resolution == "serverRequest/resolved"
+                    else {"threadId": "thread-1", "turn": {"id": "turn-1"}}
+                )
+                await ws.send(json.dumps({"method": resolution, "params": params}))
+                await ws.send(json.dumps({"id": message["id"], "result": {}}))
+
+    with tempfile.TemporaryDirectory(prefix="ctb-interactions-") as directory:
+        path = Path(directory) / "app.sock"
+        async with unix_serve(handler, str(path)):
+            client = AppServer(path)
+            try:
+                await client.call("thread/resume", {"threadId": "thread-1"})
+                assert client.interactions["pending-request"]["method"] == method
+                await client.call("thread/read", {"threadId": "thread-1"})
+                assert client.interactions == {}
+                assert responses == []
+                await client.call("thread/resume", {"threadId": "thread-1"})
+            finally:
+                await client.close()
+            assert client.interactions == {}
+            assert responses == []

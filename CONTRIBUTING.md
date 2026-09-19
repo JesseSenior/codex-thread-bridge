@@ -1,26 +1,24 @@
 # Contributing
 
-Use the development commands in the README. Keep the bridge independent of a
-specific repository, skill collection, Desktop installation, or user's paths.
+Keep the bridge independent of a particular repository, Desktop installation,
+skill collection, or user's paths. Do not add a bridge database or a companion
+process. Do not read or migrate historical ledger files.
 
-The modules have five responsibilities:
+- `rpc.py`: JSON-RPC over the existing Unix WebSocket, with unanswered server requests.
+- `settings.py`: read server-owned task settings and verify restored permissions.
+- `bridge.py`: task operations, partial failures, pagination, and stateless waits.
+- `server.py`: ten MCP tools and read-only CLI diagnostics.
 
-- `rpc.py`: multiplexed JSON-RPC over an existing Unix WebSocket connection.
-- `ledger.py`: durable mutation receipts and duplicate-request suppression.
-- `bridge.py`: behavior of the tools, including partial failures and bounded reads.
-- `worktrees.py`: validated, retained Git checkout preparation; no Desktop lifecycle.
-- `server.py`: MCP schemas, lifecycle, and command-line configuration.
+Use the development commands in the README. Test mutation response loss at each
+step, retained identifiers after partial success, and delivery races without
+replay. Test cursors across MCP restarts. Worktree requests must fail before RPC
+calls or filesystem changes. Do not add fork support.
 
-Changes to mutation handling need tests for response loss, cancellation, duplicate
-request IDs, and partial completion. Preserve the distinction between a received
-API response and completed agent work. Do not infer Desktop project membership
-from an App Server project ID.
+Use a fake server for automated tests. Live checks must use disposable tasks and
+must not restart the shared App Server or interrupt existing user tasks. Desktop
+disconnection and answers to human requests remain user-controlled. Keep personal
+paths, credentials, transcripts, and task IDs out of commits.
 
-Use a fake server for automated tests. Live tests create real retained sessions
-and use the configured model; run them only with explicit authorization and an
-exact proposed prompt. Keep personal paths, thread IDs, transcripts, config files,
-credentials, and operation databases out of commits.
-
-When reporting bugs, include bridge and Codex versions, host OS, the failed API
-method, and a redacted receipt. Check whether the failure occurs at MCP discovery,
-connection, dispatch, or Desktop visibility before proposing a workaround.
+Report the bridge and server versions, failed method, actual server error, and
+known artifact IDs when diagnosing a failure. Do not infer Desktop project
+membership from directory paths or backend project IDs.

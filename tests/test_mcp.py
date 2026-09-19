@@ -1,149 +1,109 @@
-import json
+import os
+import subprocess
 import sys
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+TOOLS = {
+    "create_thread",
+    "send_message_to_thread",
+    "list_projects",
+    "list_threads",
+    "list_archived_threads",
+    "read_thread",
+    "wait_threads",
+    "set_thread_pinned",
+    "set_thread_archived",
+    "set_thread_title",
+}
 
-async def test_mcp_forwards_json_shaped_pagination_cursors(fake_server, tmp_path):
-    fake, socket = fake_server
-    fake.cursor = lambda offset: json.dumps({"offset": offset, "scope": {"kind": "turns"}})
-    fake.offset = lambda cursor: 0 if cursor is None else json.loads(cursor)["offset"]
-    fake.threads = {
-        f"thread-{i}": {
-            "id": f"thread-{i}",
-            "cwd": str(tmp_path),
-            "status": {"type": "idle"},
-            "turns": [{"id": f"turn-{j}", "status": "completed", "items": []} for j in range(2)],
-        }
-        for i in range(2)
-    }
-    params = StdioServerParameters(
+
+def process_params(socket, home):
+    return StdioServerParameters(
         command=sys.executable,
-        args=[
-            "-m",
-            "codex_thread_bridge.server",
-            "--socket",
-            str(socket),
-            "--state-dir",
-            str(tmp_path / "state"),
-        ],
-    )
-    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-        await session.initialize()
-        for tool, args, page_key, expected_id in (
-            ("read_thread", {"thread_id": "thread-0", "limit": 1}, "turnsPage", "turn-0"),
-            ("list_threads", {"limit": 1}, None, "thread-1"),
-        ):
-            first = await session.call_tool(tool, args)
-            assert not first.isError
-            page = first.structuredContent[page_key] if page_key else first.structuredContent
-            cursor = page["nextCursor"]
-            second = await session.call_tool(tool, {**args, "cursor": cursor})
-            assert not second.isError, second.content
-            page = second.structuredContent[page_key] if page_key else second.structuredContent
-            assert [item["id"] for item in page["data"]] == [expected_id]
-            method = "thread/turns/list" if page_key else "thread/list"
-            assert [p["cursor"] for m, p in fake.calls if m == method and "cursor" in p] == [cursor]
-    assert not any(
-        method in {"thread/start", "thread/resume", "turn/start"} for method, _ in fake.calls
+        args=["-m", "codex_thread_bridge.server", "--socket", str(socket)],
+        env={**os.environ, "CODEX_HOME": str(home), "XDG_STATE_HOME": str(home)},
     )
 
 
-async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_path):
+async def test_stdio_inventory_stateless_start_and_worktree_error(fake_server, tmp_path):
     fake, socket = fake_server
-    params = StdioServerParameters(
-        command=sys.executable,
-        args=[
-            "-m",
-            "codex_thread_bridge.server",
-            "--socket",
-            str(socket),
-            "--state-dir",
-            str(tmp_path / "state"),
-        ],
-    )
-    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+    home = tmp_path / "no-state"
+    async with (
+        stdio_client(process_params(socket, home)) as (read, write),
+        ClientSession(read, write) as session,
+    ):
         await session.initialize()
         tools = (await session.list_tools()).tools
-        assert {tool.name for tool in tools} == {
-            "get_capabilities",
+        assert {t.name for t in tools} == TOOLS
+        assert all("request_id" not in t.inputSchema.get("properties", {}) for t in tools)
+        assert fake.calls == []
+        result = await session.call_tool(
             "create_thread",
-            "create_worktree_thread",
-            "send_message_to_thread",
-            "read_thread",
-            "list_threads",
-            "wait_thread",
-            "get_goal",
-            "get_operation",
-        }
-        caps = await session.call_tool("get_capabilities", {})
-        assert not caps.isError
-        assert caps.structuredContent["capabilities"]["desktopManagedWorktrees"] is False
-        args = {"request_id": "mcp-create", "cwd": str(tmp_path), "prompt": "READY"}
-        result = await session.call_tool("create_thread", args)
-        assert not result.isError
-        receipt = result.structuredContent
-        assert receipt["status"] == "accepted"
-        repeated = await session.call_tool("create_thread", args)
-        assert repeated.structuredContent["replayed"]
-        followup = await session.call_tool(
-            "send_message_to_thread",
             {
-                "request_id": "mcp-send",
-                "thread_id": receipt["threadId"],
-                "message": "FOLLOWUP",
+                "cwd": str(tmp_path),
+                "environment": {"type": "worktree"},
             },
         )
-        sent = followup.structuredContent
-        assert sent["status"] == "accepted"
-        waited = await session.call_tool(
-            "wait_thread",
-            {
-                "thread_id": receipt["threadId"],
-                "turn_id": sent["turnId"],
-                "timeout_seconds": 0,
-            },
-        )
-        assert waited.structuredContent["turn"]["items"][0]["text"] == "FOLLOWUP"
-        history = await session.call_tool("read_thread", {"thread_id": receipt["threadId"]})
-        assert len(history.structuredContent["turnsPage"]["data"]) == 2
-        goal = await session.call_tool("get_goal", {"thread_id": receipt["threadId"]})
-        assert goal.structuredContent["goal"] is None
-        invalid = await session.call_tool("create_thread", {**args, "sandbox": "invalid"})
-        assert invalid.isError
-    assert fake.count("thread/start") == 1 and fake.count("turn/start") == 2
+        assert result.isError and "Worktree support is not available" in result.content[0].text
+        assert fake.calls == []
+    assert not home.exists()
 
 
-async def test_mcp_socket_alias_restart_does_not_repeat_creation(fake_server, tmp_path):
+async def test_stdio_creation_pagination_metadata_and_restart_wait(fake_server, tmp_path):
     fake, socket = fake_server
-    alias = socket.parent / "alias.sock"
-    alias.symlink_to(socket)
-    receipts = []
-    for path in [alias, socket]:
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=[
-                "-m",
-                "codex_thread_bridge.server",
-                "--socket",
-                str(path),
-                "--state-dir",
-                str(tmp_path / "state"),
-            ],
+    params = process_params(socket, tmp_path / "state")
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        created = await session.call_tool(
+            "create_thread", {"cwd": str(tmp_path), "prompt": "first"}
         )
-        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(
-                "create_thread",
-                {
-                    "request_id": "stable-create",
-                    "cwd": str(tmp_path),
-                    "prompt": "READY",
-                },
-            )
-            assert not result.isError
-            receipts.append(result.structuredContent)
-    assert receipts[0]["threadId"] == receipts[1]["threadId"]
-    assert receipts[1]["replayed"]
-    assert fake.count("thread/start") == 1 and fake.count("turn/start") == 1
+        assert not created.isError
+        tid = created.structuredContent["threadId"]
+        await session.call_tool("send_message_to_thread", {"threadId": tid, "prompt": "second"})
+        first = await session.call_tool("read_thread", {"threadId": tid, "turnLimit": 1})
+        cursor = first.structuredContent["turnsPage"]["nextCursor"]
+        second = await session.call_tool(
+            "read_thread", {"threadId": tid, "turnLimit": 1, "cursor": cursor}
+        )
+        assert second.structuredContent["turnsPage"]["data"][0]["items"][0]["text"] == "first"
+        for name, args in [
+            ("set_thread_title", {"title": "Saved"}),
+            ("set_thread_pinned", {"pinned": True}),
+            ("set_thread_archived", {"archived": True}),
+        ]:
+            result = await session.call_tool(name, {"threadId": tid, **args})
+            assert result.structuredContent["status"] == "accepted"
+        archived = await session.call_tool("list_archived_threads", {})
+        assert archived.structuredContent["data"][0]["name"] == "Saved"
+        await session.call_tool("set_thread_archived", {"threadId": tid, "archived": False})
+        wait = await session.call_tool(
+            "wait_threads", {"targets": [{"threadId": tid}], "timeoutMs": 0}
+        )
+        cursor = wait.structuredContent["threads"][0]["cursor"]
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        wait = await session.call_tool(
+            "wait_threads",
+            {
+                "targets": [{"threadId": tid, "afterCursor": cursor}],
+                "timeoutMs": 0,
+            },
+        )
+        assert wait.structuredContent["threads"][0]["unchanged"]
+        assert "turn" not in wait.structuredContent["threads"][0]
+    assert fake.count("thread/start") == 1 and fake.count("turn/start") == 2
+    assert not (tmp_path / "state").exists()
+
+
+def test_old_state_option_is_removed_and_historical_file_is_untouched(tmp_path):
+    ledger = tmp_path / "operations.sqlite3"
+    ledger.write_bytes(b"historical data: do not read or change")
+    result = subprocess.run(
+        [sys.executable, "-m", "codex_thread_bridge.server", "serve", "--state-dir", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and "unrecognized arguments" in result.stderr
+    assert ledger.read_bytes() == b"historical data: do not read or change"
