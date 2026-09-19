@@ -27,6 +27,20 @@ func compactTurn(turn j.Object, chars int, outputs bool) j.Object {
 	for _, v := range j.List(turn["items"]) {
 		item := j.Map(v)
 		kind := j.String(item["type"])
+		delegated := ""
+		if kind == "userMessage" {
+			delegated = textContent(item["content"])
+		}
+		if kind == "functionCallOutput" && item["namespace"] == "codex_app" {
+			switch item["name"] {
+			case "create_thread", "send_message_to_thread", "handoff_thread":
+				delegated = j.String(item["output"])
+			}
+		}
+		if source, prompt, ok := parseDelegation(delegated); ok {
+			messages = append(messages, j.Object{"id": item["id"], "role": "user", "text": Clip(prompt, chars, true), "sourceThreadId": source})
+			continue
+		}
 		switch kind {
 		case "reasoning":
 			continue

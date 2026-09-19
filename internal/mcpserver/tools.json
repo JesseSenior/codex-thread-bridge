@@ -1,7 +1,7 @@
 [
   {
     "name": "create_thread",
-    "description": "Create in an existing directory, optionally with a title and prompt. Explicit model and thinking overrides require a supported server catalog combination. Omitted settings use server defaults. Worktrees are unsupported. Partial failures retain known IDs; never automatically resend an unknown outcome.",
+    "description": "Create in an existing directory, optionally with a title and prompt. Explicit model and thinking overrides require a supported server catalog combination. Omitted settings use server defaults. Worktrees are unsupported. Partial failures retain known IDs; never automatically resend an unknown outcome. Caller attribution is added automatically from MCP _meta.threadId when available; otherwise messages use ordinary text.",
     "inputSchema": {
       "$defs": {
         "Environment": {
@@ -166,7 +166,7 @@
   },
   {
     "name": "send_message_to_thread",
-    "description": "Send a message, optionally saving model and thinking overrides for the next turn. Active turns are steered without interruption. Unsupported settings updates fail before message delivery. Partial successes retain known IDs; never automatically resend an unknown outcome.",
+    "description": "Send a message, optionally saving model and thinking overrides for the next turn. Active turns are steered without interruption. Unsupported settings updates fail before message delivery. Partial successes retain known IDs; never automatically resend an unknown outcome. Caller attribution is added automatically from MCP _meta.threadId when available; otherwise messages use ordinary text.",
     "inputSchema": {
       "properties": {
         "threadId": {

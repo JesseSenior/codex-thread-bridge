@@ -27,7 +27,7 @@ func TestCatalogValidation(t *testing.T) {
 				f.Edit(func(f *testserver.Fake) { f.Reject[tc.reject] = j.Object{"code": -32601, "message": "unavailable"} })
 			}
 			tc.args["cwd"] = dir
-			if _, err := b.Create(ctx, tc.args); err == nil {
+			if _, err := b.Create(ctx, tc.args, ""); err == nil {
 				t.Fatal("invalid override accepted")
 			}
 			eq(t, f.Count("thread/start"), 0)
@@ -66,7 +66,7 @@ func TestFollowupOverrides(t *testing.T) {
 		f.Edit(func(f *testserver.Fake) { f.Complete = !active })
 		created := create(t, b, j.Object{"cwd": dir, "prompt": "start"})
 		id := j.String(created["threadId"])
-		r, err := b.Send(ctx, id, "follow", "other", "low")
+		r, err := b.Send(ctx, id, "follow", "other", "low", "")
 		r = must(t, r, err)
 		eq(t, r["settingsUpdated"], true)
 		eq(t, r["messageSent"], true)
@@ -107,12 +107,12 @@ func TestFollowupOverrides(t *testing.T) {
 func TestUnloadedOverridesAndMissingSettings(t *testing.T) {
 	b, f, dir := setup(t)
 	id := f.Add(dir, j.Object{"status": j.Object{"type": "notLoaded"}})
-	r, err := b.Send(ctx, id, "fail", "other", nil)
+	r, err := b.Send(ctx, id, "fail", "other", nil, "")
 	eq(t, must(t, r, err)["status"], "failed")
 	eq(t, f.Count("thread/resume"), 0)
 	path := record(t, dir, id)
 	f.Edit(func(f *testserver.Fake) { f.Threads[id]["path"] = path })
-	r, err = b.Send(ctx, id, "safe", "other", nil)
+	r, err = b.Send(ctx, id, "safe", "other", nil, "")
 	eq(t, must(t, r, err)["status"], "accepted")
 	eq(t, f.Params("thread/settings/update")["effort"], "low")
 	eq(t, f.Params("thread/resume")["model"], "saved-model")
@@ -127,7 +127,7 @@ func TestUnloadedOverridesAndMissingSettings(t *testing.T) {
 			}
 		}
 	})
-	r, err = b.Send(ctx, id, "effort only", nil, "high")
+	r, err = b.Send(ctx, id, "effort only", nil, "high", "")
 	eq(t, must(t, r, err)["settings"], j.Object{"model": "other", "thinking": "high"})
 }
 
@@ -156,7 +156,7 @@ func TestOverrideFailures(t *testing.T) {
 				f.Reject[tc.method] = j.Object{"code": -32601, "message": "unsupported"}
 			}
 		})
-		r, err := b.Send(ctx, id, "once", "other", "low")
+		r, err := b.Send(ctx, id, "once", "other", "low", "")
 		r = must(t, r, err)
 		wantStatus := "failed"
 		if tc.drop && tc.method != "model/list" {
@@ -281,7 +281,7 @@ func TestOverrideValidationBeforeResume(t *testing.T) {
 	id := f.Add(dir, j.Object{"status": j.Object{"type": "notLoaded"}})
 	path := record(t, dir, id)
 	f.Edit(func(f *testserver.Fake) { f.Threads[id]["path"] = path })
-	r, err := b.Send(ctx, id, "not delivered", "unknown", "low")
+	r, err := b.Send(ctx, id, "not delivered", "unknown", "low", "")
 	eq(t, must(t, r, err)["status"], "failed")
 	eq(t, f.Count("thread/resume"), 0)
 	eq(t, f.Count("thread/settings/update"), 0)
@@ -303,7 +303,7 @@ func TestSavedSettingsSurviveDeliveryRace(t *testing.T) {
 				}
 			}
 		})
-		r, err := b.Send(ctx, id, "race", "other", "low")
+		r, err := b.Send(ctx, id, "race", "other", "low", "")
 		r = must(t, r, err)
 		eq(t, r["status"], "failed")
 		eq(t, r["settingsUpdated"], true)
@@ -334,7 +334,7 @@ func TestSettingsSavedBeforeReadFailure(t *testing.T) {
 			}
 		}
 	})
-	r, err := b.Send(ctx, id, "not sent", "other", "low")
+	r, err := b.Send(ctx, id, "not sent", "other", "low", "")
 	r = must(t, r, err)
 	eq(t, r["status"], "failed")
 	eq(t, r["settingsUpdated"], true)

@@ -31,6 +31,7 @@ type Fake struct {
 	Models        []any
 	Config        j.Object
 	ModelPageSize int
+	UserAgent     string
 	Projects      []any
 	Complete      bool
 	Drop          string
@@ -53,6 +54,7 @@ func Start(t *testing.T) *Fake {
 		t.Fatal(err)
 	}
 	f := &Fake{Socket: filepath.Join(dir, "app.sock"), Threads: map[string]j.Object{}, Reject: map[string]j.Object{}, Complete: true, Override: j.Object{}, Projects: []any{}, Paused: make(chan struct{}, 1), Release: make(chan struct{})}
+	f.UserAgent = "fake/0.154.0"
 	f.Config = j.Object{"model": "server-default", "model_reasoning_effort": "medium"}
 	for _, name := range []string{"server-default", "other", "saved-model"} {
 		f.Models = append(f.Models, j.Object{"id": name, "model": name, "isDefault": name == "server-default", "defaultReasoningEffort": "medium", "supportedReasoningEfforts": []any{j.Object{"reasoningEffort": "low"}, j.Object{"reasoningEffort": "medium"}, j.Object{"reasoningEffort": "high"}}})
@@ -157,7 +159,7 @@ func Sandbox(p j.Object) j.Object {
 }
 func (f *Fake) dispatch(method string, p j.Object) (j.Object, *rpc.Error) {
 	if method == "initialize" {
-		return j.Object{"userAgent": "fake/0.154.0"}, nil
+		return j.Object{"userAgent": f.UserAgent}, nil
 	}
 	if method == "config/read" {
 		return j.Object{"config": clone(f.Config)}, nil
@@ -241,7 +243,19 @@ func (f *Fake) dispatch(method string, p j.Object) (j.Object, *rpc.Error) {
 		if !f.Complete {
 			status, state = "inProgress", "active"
 		}
-		turn := j.Object{"id": fmt.Sprintf("turn-%d", len(turns)+1), "status": status, "model": thread["model"], "effort": thread["reasoningEffort"], "items": []any{j.Object{"type": "agentMessage", "text": j.Map(j.List(p["input"])[0])["text"]}}}
+		items := []any{}
+		text := ""
+		if output := j.Map(p["toolOutput"]); output != nil {
+			items = append(items, j.Object{"id": "input", "type": "functionCallOutput", "namespace": output["namespace"], "name": output["name"], "output": output["output"]})
+		} else {
+			content := j.List(p["input"])
+			if len(content) > 0 {
+				text = j.String(j.Map(content[0])["text"])
+			}
+			items = append(items, j.Object{"id": "input", "type": "userMessage", "content": content})
+		}
+		items = append(items, j.Object{"type": "agentMessage", "text": text})
+		turn := j.Object{"id": fmt.Sprintf("turn-%d", len(turns)+1), "status": status, "model": thread["model"], "effort": thread["reasoningEffort"], "items": items}
 		thread["turns"] = append(turns, turn)
 		thread["status"] = j.Object{"type": state}
 		return j.Object{"turn": clone(turn)}, nil
@@ -250,6 +264,8 @@ func (f *Fake) dispatch(method string, p j.Object) (j.Object, *rpc.Error) {
 		if j.Map(thread["status"])["type"] != "active" || len(turns) == 0 || !j.Equal(j.Map(turns[len(turns)-1])["id"], p["expectedTurnId"]) {
 			return nil, &rpc.Error{Method: method, Data: j.Object{"code": -32600, "message": "turn no longer active"}}
 		}
+		turn := j.Map(turns[len(turns)-1])
+		turn["items"] = append(j.List(turn["items"]), j.Object{"id": "steered", "type": "userMessage", "content": p["input"]})
 		return j.Object{"turnId": p["expectedTurnId"]}, nil
 	case "thread/name/set":
 		thread["name"] = p["name"]

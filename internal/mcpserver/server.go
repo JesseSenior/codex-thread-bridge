@@ -14,6 +14,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 //go:embed tools.json
@@ -72,7 +73,17 @@ func New(b *bridge.Bridge) (*mcp.Server, error) {
 					}
 				}
 			}
-			out, err := dispatch(ctx, b, tool.Name, args)
+			source := ""
+			if tool.Name == "create_thread" || tool.Name == "send_message_to_thread" {
+				if value, exists := req.Params.Meta["threadId"]; exists {
+					var ok bool
+					source, ok = value.(string)
+					if !ok || strings.TrimSpace(source) == "" || utf8.RuneCountInString(source) > 128 {
+						return failure(fmt.Errorf("_meta.threadId must contain 1–128 characters"))
+					}
+				}
+			}
+			out, err := dispatch(ctx, b, tool.Name, args, source)
 			if err != nil {
 				return failure(err)
 			}
@@ -85,14 +96,14 @@ func New(b *bridge.Bridge) (*mcp.Server, error) {
 	}
 	return server, nil
 }
-func dispatch(ctx context.Context, b *bridge.Bridge, name string, a j.Object) (j.Object, error) {
+func dispatch(ctx context.Context, b *bridge.Bridge, name string, a j.Object, source string) (j.Object, error) {
 	id := j.String(a["threadId"])
 	cursor := j.String(a["cursor"])
 	switch name {
 	case "create_thread":
-		return b.Create(ctx, a)
+		return b.Create(ctx, a, source)
 	case "send_message_to_thread":
-		return b.Send(ctx, id, j.String(a["prompt"]), a["model"], a["thinking"])
+		return b.Send(ctx, id, j.String(a["prompt"]), a["model"], a["thinking"], source)
 	case "list_projects":
 		return b.Projects(ctx, j.Int(j.Default(a, "limit", 20)), cursor)
 	case "list_threads", "list_archived_threads":

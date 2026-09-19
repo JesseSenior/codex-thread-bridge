@@ -74,6 +74,18 @@ Use `read_thread` to read the result, or `wait_threads` to wait:
 {"targets": [{"threadId": "TASK_ID"}], "timeoutMs": 20000}
 ```
 
+When Codex supplies `_meta.threadId` in the MCP request, the bridge adds
+Desktop-compatible source attribution to initial prompts and follow-up messages.
+Desktop can then show “Sent by … from another task.” The caller ID is used only
+for that request; it is not stored or read from the process environment. Clients
+without this metadata send ordinary messages. Invalid caller IDs are rejected.
+No additional tool argument is required.
+
+Attributed turn starts use native tool output on servers at or above
+`0.151.0-alpha.4`. Steering and older or unrecognized server versions use the
+Desktop text wrapper. The bridge selects the format before delivery and never
+retries a message with another format after failure.
+
 `create_thread` and `send_message_to_thread` accept optional `model` and
 `thinking` values. Explicit overrides must match the App Server model catalog.
 Omitted settings retain server defaults on creation or saved task settings on
@@ -95,7 +107,9 @@ Settings can be saved even if message delivery fails. If an operation returns
 when present. Messages have a role and text; tools have identity, type, status,
 and available command or tool details. Set `includeOutputs: true` to add tool
 and command outputs. Outputs are excluded by default; raw reasoning is excluded
-in both modes. `maxOutputCharsPerItem` limits displayed text (default 4000).
+in both modes. Recognized delegation messages show the decoded prompt and
+`sourceThreadId`, including when outputs are excluded. `maxOutputCharsPerItem`
+limits displayed text (default 4000).
 
 `wait_threads` returns `threads`, `errors`, and `timedOut`. Each task contains
 status, outcome, pending interaction methods, and compact `progress` with the

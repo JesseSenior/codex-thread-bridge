@@ -34,12 +34,12 @@ func must(t *testing.T, v j.Object, err error) j.Object {
 }
 func create(t *testing.T, b *Bridge, a j.Object) j.Object {
 	t.Helper()
-	v, e := b.Create(ctx, a)
+	v, e := b.Create(ctx, a, "")
 	return must(t, v, e)
 }
 func send(t *testing.T, b *Bridge, id, prompt string) j.Object {
 	t.Helper()
-	v, e := b.Send(ctx, id, prompt, nil, nil)
+	v, e := b.Send(ctx, id, prompt, nil, nil, "")
 	return must(t, v, e)
 }
 func wait(t *testing.T, b *Bridge, targets []any, ms int) j.Object {
@@ -63,7 +63,7 @@ func TestDefaultsAndExactPrompt(t *testing.T) {
 	eq(t, f.Params("thread/start"), j.Object{"cwd": resolved, "ephemeral": false})
 	id := j.String(r["threadId"])
 	thread := f.Thread(id)
-	eq(t, j.Map(j.List(j.Map(j.List(thread["turns"])[0])["items"])[0])["text"], "  exact\nmessage  ")
+	eq(t, j.Map(j.List(j.Map(j.List(thread["turns"])[0])["items"])[1])["text"], "  exact\nmessage  ")
 	eq(t, thread["name"], "Example")
 	next := send(t, b, id, "next")
 	eq(t, next["delivery"], "started")
@@ -394,7 +394,7 @@ func TestMissingRollout(t *testing.T) {
 }
 func TestWorktreeNoSideEffects(t *testing.T) {
 	b, f, dir := setup(t)
-	_, err := b.Create(ctx, j.Object{"cwd": dir, "environment": j.Object{"type": "worktree"}})
+	_, err := b.Create(ctx, j.Object{"cwd": dir, "environment": j.Object{"type": "worktree"}}, "")
 	if err == nil || !strings.Contains(err.Error(), "Worktree support") {
 		t.Fatal(err)
 	}

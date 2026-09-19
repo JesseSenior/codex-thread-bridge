@@ -123,7 +123,7 @@ func (b *Bridge) mutate(ctx context.Context, known j.Object, action func(callFun
 	}
 	return result, nil
 }
-func (b *Bridge) Create(ctx context.Context, a j.Object) (j.Object, error) {
+func (b *Bridge) Create(ctx context.Context, a j.Object, source string) (j.Object, error) {
 	if env := a["environment"]; env != nil {
 		e := j.Map(env)
 		if e["type"] == "worktree" {
@@ -199,7 +199,9 @@ func (b *Bridge) Create(ctx context.Context, a j.Object) (j.Object, error) {
 			}
 		}
 		if a["prompt"] != nil {
-			turn, err := call("turn/start", j.Object{"threadId": tid, "input": input(a["prompt"])})
+			params := b.messageInput(j.String(a["prompt"]), source, "create_thread", false)
+			params["threadId"] = tid
+			turn, err := call("turn/start", params)
 			if err != nil {
 				return err
 			}
@@ -223,7 +225,7 @@ func latest(call callFunc, id, items string) (any, error) {
 	}
 	return rows[0], nil
 }
-func (b *Bridge) Send(ctx context.Context, id, prompt string, model, thinking any) (j.Object, error) {
+func (b *Bridge) Send(ctx context.Context, id, prompt string, model, thinking any, source string) (j.Object, error) {
 	if err := nonempty(id, "threadId", 128); err != nil {
 		return nil, err
 	}
@@ -293,7 +295,9 @@ func (b *Bridge) Send(ctx context.Context, id, prompt string, model, thinking an
 			}
 			result["turnId"] = turn["id"]
 			result["messageSent"] = nil
-			steered, err := call("turn/steer", j.Object{"threadId": id, "expectedTurnId": turn["id"], "input": input(prompt)})
+			params := b.messageInput(prompt, source, "send_message_to_thread", true)
+			params["threadId"], params["expectedTurnId"] = id, turn["id"]
+			steered, err := call("turn/steer", params)
 			if err != nil {
 				return err
 			}
@@ -301,7 +305,9 @@ func (b *Bridge) Send(ctx context.Context, id, prompt string, model, thinking an
 			result["delivery"] = "steered"
 		} else {
 			result["messageSent"] = nil
-			started, err := call("turn/start", j.Object{"threadId": id, "input": input(prompt)})
+			params := b.messageInput(prompt, source, "send_message_to_thread", false)
+			params["threadId"] = id
+			started, err := call("turn/start", params)
 			if err != nil {
 				return err
 			}
