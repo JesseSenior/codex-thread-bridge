@@ -43,6 +43,9 @@ def make_server(bridge: Bridge):
     mcp = FastMCP(
         "codex-thread-bridge",
         instructions=(
+            "When ChatGPT Desktop is connected and its official tools support the requested "
+            "operation on the target host, use those tools first. Use this bridge only as a "
+            "fallback when the official connection or required tool is unavailable. "
             "Manage tasks on this remote host through its existing App Server, including while "
             "Desktop is disconnected. Use explicit task IDs. No bridge database or mutation "
             "replay exists. Never automatically resend a mutation after an unknown outcome. "
