@@ -1,6 +1,6 @@
 # codex-thread-bridge
 
-Version `0.2.0`.
+Version `0.3.0`.
 
 A stateless MCP server for task management through an **existing App Server on
 one remote host**. It continues to work when ChatGPT Desktop disconnects, provided
@@ -9,20 +9,57 @@ patch Desktop, install a local companion, or keep a bridge database.
 
 ## Install and connect
 
-Requires Python 3.11+ and an authenticated App Server with a Unix WebSocket
-control socket. Run the bridge as the same user on the same host as that server.
-
 ```sh
-uv sync --frozen --no-dev
-.venv/bin/codex-thread-bridge --help
-.venv/bin/codex-thread-bridge diagnose
-codex mcp add codex-thread-bridge -- /absolute/path/to/.venv/bin/codex-thread-bridge
+curl -fsSL https://github.com/JesseSenior/codex-thread-bridge/releases/latest/download/install.sh | bash
 ```
 
+The installer downloads the latest stable Linux amd64 executable, verifies its
+SHA-256 checksum and version, installs it at `~/.local/bin/codex-thread-bridge`,
+and registers its absolute path with `codex mcp add`. No Python, Go, or runtime
+extraction is required. Run the same command to update or reinstall.
+
+Requires Linux amd64, kernel 3.2 or later, Bash, curl, `sha256sum` or `shasum`,
+and the Codex CLI on `PATH`. The executable has no glibc dependency. Run the
+bridge as the same user on the same host as an authenticated App Server with a
+Unix WebSocket control socket.
+
+Select a release or a custom socket:
+
+```sh
+curl -fsSL https://github.com/JesseSenior/codex-thread-bridge/releases/latest/download/install.sh | bash -s -- --version v0.3.0
+curl -fsSL https://github.com/JesseSenior/codex-thread-bridge/releases/latest/download/install.sh | bash -s -- --socket '/absolute/path/to/app.sock'
+```
+
+The installer honors `CODEX_HOME` and replaces the existing `codex-thread-bridge`
+MCP entry. Pass `--socket` again when updating to retain an explicit override.
+Installation does not require a running App Server. If registration fails, the
+installer returns an error and prints a command to register the installed binary.
+
 The default socket is `$CODEX_HOME/app-server-control/app-server-control.sock`.
-`CODEX_HOME` defaults to `~/.codex`. Use `--socket /absolute/path/to/socket` to
-select another existing server. `diagnose` is read-only and starts no task.
+`CODEX_HOME` defaults to `~/.codex`. `diagnose` is read-only and starts no task.
 An unavailable server produces a connection error; the bridge never starts one.
+
+```sh
+~/.local/bin/codex-thread-bridge --help
+~/.local/bin/codex-thread-bridge diagnose
+```
+
+Remove the MCP entry and executable:
+
+```sh
+codex mcp remove codex-thread-bridge
+rm -- "$HOME/.local/bin/codex-thread-bridge"
+```
+
+For a source installation, install Go 1.27.0, clone this repository, and run:
+
+```sh
+go mod download
+./scripts/build.sh
+mkdir -p "$HOME/.local/bin"
+install -m 755 dist/codex-thread-bridge-linux-amd64 "$HOME/.local/bin/codex-thread-bridge"
+codex mcp add codex-thread-bridge -- "$HOME/.local/bin/codex-thread-bridge"
+```
 
 ## Tools
 
@@ -140,20 +177,27 @@ empty catalog as proof that Desktop is disconnected.
 
 ## Migration and compatibility
 
-This is a breaking API change from the ledger-based interface. Remove
+Version 0.3.0 replaces Python with Go and preserves the 0.2.0 CLI and MCP tools.
+Existing wait cursors remain valid for the same socket path and task.
+
+The earlier stateless interface was a breaking change from the ledger-based interface. Remove
 `--state-dir` and mutation request IDs from client configuration. Rediscover the
 MCP tool schemas. Old ledger files are left untouched; this version neither reads
 nor requires them. Task state stays with the App Server. All bridge connection,
 request, and wait state is held in memory.
 
-Compatibility checks used ChatGPT Desktop **26.915.31029 (build 9771)** on macOS
+The Python 0.2.0 compatibility checks used ChatGPT Desktop **26.915.31029 (build 9771)** on macOS
 and App Server **0.154.0** on Linux. Tests used the existing server, without a
 restart. Disposable tasks preserved pending Desktop tool, human-input, and
 approval requests across client disconnections; Desktop completed the same
 turns. Native Desktop task listing also recognized remote rename, pin, archive,
 and unarchive results. Read-only, workspace-write, and built-in read-only profile
 restoration were checked. Custom profiles and future protocol changes require
-additional validation. No worktree or fork behavior is claimed.
+additional validation. No worktree or fork behavior is claimed. The Go port is checked against an
+isolated fake App Server and Python reference fixtures. Go 0.3.0 also passed
+read-only diagnostics, task listing, history reads, and immediate waits against
+App Server 0.154.0 on Linux amd64 with kernel 5.15. Live mutation checks have
+not been repeated for Go.
 
 The server does not preserve all sandbox settings when an unloaded task is
 resumed without overrides. This bridge restores saved settings and verifies the
@@ -163,15 +207,22 @@ This is not a substitute for controlling permissions on the App Server itself.
 ## Development
 
 ```sh
-uv sync --frozen --group dev
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-uv run ty check src
-uv build
+./scripts/check.sh
+./scripts/test-binary.sh
 ```
+
+`check.sh` checks formatting, verifies modules, runs `go vet` and race tests,
+and builds the static Linux amd64 executable. Race tests require a C compiler;
+the release executable does not. `test-binary.sh` requires Docker and runs the
+compiled MCP tests in a minimal container without libc and in Debian. Both use
+a read-only root filesystem. Container tests do not test an old Linux kernel.
 
 Tests use a fake App Server over a real Unix WebSocket and an MCP stdio client.
 They do not start models or use existing user tasks. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+GitHub Actions runs the checks on pushes and pull requests. A stable `vX.Y.Z`
+tag publishes the executable, `SHA256SUMS`, and `install.sh` only after all
+checks pass and the tag matches the project and runtime versions. Change the
+single version constant in `internal/version/version.go` before tagging.
 
 Independent project, not affiliated with or endorsed by OpenAI. MIT licensed.

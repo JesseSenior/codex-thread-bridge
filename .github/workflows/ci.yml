@@ -1,21 +1,51 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
 permissions:
   contents: read
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-go@v6
         with:
-          python-version: ${{ matrix.python }}
-      - run: uv sync --frozen --group dev
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run ty check src
-      - run: uv run pytest
-      - run: uv build
+          go-version: '1.27.0'
+          cache: true
+      - run: ./scripts/check.sh
+      - name: Check runtime version
+        run: |
+          file dist/codex-thread-bridge-linux-amd64
+          test "$(dist/codex-thread-bridge-linux-amd64 --version)" = "$(sed -n 's/^const Version = "\([^"]*\)"/\1/p' internal/version/version.go)"
+      - run: ./scripts/test-binary.sh
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/check-release.sh "$RELEASE_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: |
+            dist/codex-thread-bridge-linux-amd64
+            dist/SHA256SUMS
+            dist/install.sh
+          if-no-files-found: error
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64
+          path: release
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release/codex-thread-bridge-linux-amd64 release/SHA256SUMS release/install.sh --verify-tag --generate-notes

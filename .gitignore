@@ -9,3 +9,6 @@ dist/
 *.sqlite3*
 .env
 .beads
+
+/codex-thread-bridge
+/build/

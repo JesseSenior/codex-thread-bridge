@@ -1,0 +1,506 @@
+[
+  {
+    "name": "create_thread",
+    "description": "Create in an existing directory, optionally with a title and initial prompt.\n\nOmitted settings use remote server defaults. Worktree requests fail explicitly.\nKnown task IDs remain in partial failure responses. No automatic resend is safe.\n",
+    "inputSchema": {
+      "$defs": {
+        "Environment": {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "local",
+                "worktree"
+              ],
+              "title": "Type",
+              "type": "string"
+            },
+            "startingState": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Startingstate"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "Environment",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "cwd": {
+          "title": "Cwd",
+          "type": "string"
+        },
+        "prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Environment"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "thinking": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thinking"
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "enum": [
+                "read-only",
+                "workspace-write",
+                "danger-full-access"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sandbox"
+        },
+        "approvalPolicy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approvalpolicy"
+        },
+        "permissions": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Permissions"
+        }
+      },
+      "required": [
+        "cwd"
+      ],
+      "title": "create_threadArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "create_threadDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "send_message_to_thread",
+    "description": "Start a turn when idle or steer the active turn, preserving task settings.\n\nRaces and server rejections are returned without retrying delivery. An unloaded\ntask requires verified server-owned settings; unsupported settings fail explicitly.\n",
+    "inputSchema": {
+      "properties": {
+        "threadId": {
+          "title": "Threadid",
+          "type": "string"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "prompt"
+      ],
+      "title": "send_message_to_threadArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "send_message_to_threadDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "list_projects",
+    "description": "List server project records. An unavailable saved catalog requires Desktop.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "cursor": {
+          "default": "",
+          "title": "Cursor",
+          "type": "string"
+        }
+      },
+      "title": "list_projectsArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "list_projectsDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_threads",
+    "description": "List unarchived tasks on this host. Pass nextCursor verbatim for another page.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "cursor": {
+          "default": "",
+          "title": "Cursor",
+          "type": "string"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        }
+      },
+      "title": "list_threadsArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "list_threadsDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_archived_threads",
+    "description": "List archived tasks on this host without loading or changing them.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "cursor": {
+          "default": "",
+          "title": "Cursor",
+          "type": "string"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        }
+      },
+      "title": "list_archived_threadsArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "list_archived_threadsDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "read_thread",
+    "description": "Read task state and paginated history without resuming. Truncation is marked.",
+    "inputSchema": {
+      "properties": {
+        "threadId": {
+          "title": "Threadid",
+          "type": "string"
+        },
+        "turnLimit": {
+          "default": 10,
+          "title": "Turnlimit",
+          "type": "integer"
+        },
+        "cursor": {
+          "default": "",
+          "title": "Cursor",
+          "type": "string"
+        },
+        "maxOutputCharsPerItem": {
+          "default": 4000,
+          "title": "Maxoutputcharsperitem",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "read_threadArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "read_threadDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "wait_threads",
+    "description": "Wait for up to eight tasks; zero timeout returns an immediate snapshot.\n\nReturn completion, failure, required interaction, or timeout. Reuse each cursor\nas afterCursor, including after an MCP restart. Unchanged turn text is omitted.\nReads never resume tasks. Pending Desktop calls observed by this connection are\nreported; server approval/input flags remain visible across MCP restarts.\n",
+    "inputSchema": {
+      "$defs": {
+        "WaitTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "threadId": {
+              "title": "Threadid",
+              "type": "string"
+            },
+            "afterCursor": {
+              "default": "",
+              "title": "Aftercursor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "threadId"
+          ],
+          "title": "WaitTarget",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/WaitTarget"
+          },
+          "title": "Targets",
+          "type": "array"
+        },
+        "timeoutMs": {
+          "default": 20000,
+          "title": "Timeoutms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "targets"
+      ],
+      "title": "wait_threadsArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "wait_threadsDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_thread_pinned",
+    "description": "Pin or unpin through the remote App Server's section API.",
+    "inputSchema": {
+      "properties": {
+        "threadId": {
+          "title": "Threadid",
+          "type": "string"
+        },
+        "pinned": {
+          "title": "Pinned",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "threadId",
+        "pinned"
+      ],
+      "title": "set_thread_pinnedArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "set_thread_pinnedDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "set_thread_archived",
+    "description": "Archive or unarchive. Reject running tasks; never send an interrupt.",
+    "inputSchema": {
+      "properties": {
+        "threadId": {
+          "title": "Threadid",
+          "type": "string"
+        },
+        "archived": {
+          "title": "Archived",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "threadId",
+        "archived"
+      ],
+      "title": "set_thread_archivedArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "set_thread_archivedDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "set_thread_title",
+    "description": "Persist a task title through the remote App Server.",
+    "inputSchema": {
+      "properties": {
+        "threadId": {
+          "title": "Threadid",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "title"
+      ],
+      "title": "set_thread_titleArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "title": "set_thread_titleDictOutput",
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": true
+    }
+  }
+]

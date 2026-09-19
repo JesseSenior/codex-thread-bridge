@@ -1,0 +1,84 @@
+[
+  {
+    "tool": "list_threads",
+    "input": {
+      "limit": "2"
+    },
+    "accepted": true,
+    "output": {
+      "limit": 2,
+      "cursor": "",
+      "cwd": null
+    }
+  },
+  {
+    "tool": "list_threads",
+    "input": {
+      "limit": true
+    },
+    "accepted": true,
+    "output": {
+      "limit": 1,
+      "cursor": "",
+      "cwd": null
+    }
+  },
+  {
+    "tool": "set_thread_pinned",
+    "input": {
+      "threadId": "a",
+      "pinned": "yes"
+    },
+    "accepted": true,
+    "output": {
+      "threadId": "a",
+      "pinned": true
+    }
+  },
+  {
+    "tool": "list_threads",
+    "input": {
+      "limit": 2.0
+    },
+    "accepted": true,
+    "output": {
+      "limit": 2,
+      "cursor": "",
+      "cwd": null
+    }
+  },
+  {
+    "tool": "read_thread",
+    "input": {
+      "threadId": 123
+    },
+    "accepted": false
+  },
+  {
+    "tool": "list_threads",
+    "input": {
+      "extra": true
+    },
+    "accepted": true,
+    "output": {
+      "limit": 20,
+      "cursor": "",
+      "cwd": null
+    }
+  },
+  {
+    "tool": "list_threads",
+    "input": {
+      "limit": "2.5"
+    },
+    "accepted": false
+  },
+  {
+    "tool": "set_thread_pinned",
+    "input": {
+      "threadId": "a",
+      "pinned": "invalid"
+    },
+    "accepted": false
+  }
+]
