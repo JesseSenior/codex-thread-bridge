@@ -74,8 +74,15 @@ func (b *Bridge) mutate(ctx context.Context, known j.Object, action func(callFun
 	}
 	b.mutation.Lock()
 	defer b.mutation.Unlock()
+	mutation := false
 	call := func(method string, p j.Object) (j.Object, error) {
 		result["method"] = method
+		switch method {
+		case "thread/read", "thread/turns/list", "model/list", "config/read":
+			mutation = false
+		default:
+			mutation = true
+		}
 		return b.RPC.Call(ctx, method, p)
 	}
 	err := action(call, result)
@@ -87,13 +94,23 @@ func (b *Bridge) mutate(ctx context.Context, known j.Object, action func(callFun
 	var setting *settings.Error
 	switch {
 	case errors.As(err, &api):
+		if _, ok := result["messageSent"]; ok {
+			result["messageSent"] = false
+		}
 		result["status"] = "failed"
 		result["error"] = err.Error()
 		result["rpcError"] = api.Data
+		result["method"] = api.Method
+		if api.Method == "thread/settings/update" && j.Int(api.Data["code"]) == -32601 {
+			result["limitation"] = "This server cannot save task settings; no message was sent. A stateless bridge has no local fallback."
+		}
 	case errors.As(err, &transport):
 		result["status"] = "failed"
-		if transport.MayHaveBeenSent {
+		if transport.MayHaveBeenSent && mutation {
 			result["status"] = "outcome_unknown"
+		}
+		if !transport.MayHaveBeenSent && result["messageSent"] == nil {
+			result["messageSent"] = false
 		}
 		result["error"] = err.Error()
 		result["recovery"] = "Do not resend automatically. Inspect the task and its history."
@@ -134,6 +151,13 @@ func (b *Bridge) Create(ctx context.Context, a j.Object) (j.Object, error) {
 	}
 	if a["sandbox"] != nil && a["permissions"] != nil {
 		return nil, errors.New("sandbox and permissions cannot be combined")
+	}
+	if a["model"] != nil || a["thinking"] != nil {
+		model, effort, err := resolveModel(func(method string, params j.Object) (j.Object, error) { return b.RPC.Call(ctx, method, params) }, a["model"], a["thinking"], nil, directory)
+		if err != nil {
+			return nil, err
+		}
+		a["model"], a["thinking"] = model, effort
 	}
 	params := j.Object{"cwd": directory, "ephemeral": false}
 	for _, k := range []string{"model", "sandbox", "approvalPolicy", "permissions"} {
@@ -186,7 +210,10 @@ func (b *Bridge) Create(ctx context.Context, a j.Object) (j.Object, error) {
 }
 func input(prompt any) []any { return []any{j.Object{"type": "text", "text": prompt}} }
 func (b *Bridge) latest(ctx context.Context, id, items string) (any, error) {
-	p, err := b.RPC.Call(ctx, "thread/turns/list", j.Object{"threadId": id, "limit": 1, "itemsView": items})
+	return latest(func(method string, params j.Object) (j.Object, error) { return b.RPC.Call(ctx, method, params) }, id, items)
+}
+func latest(call callFunc, id, items string) (any, error) {
+	p, err := call("thread/turns/list", j.Object{"threadId": id, "limit": 1, "itemsView": items})
 	if err != nil {
 		return nil, err
 	}
@@ -196,19 +223,27 @@ func (b *Bridge) latest(ctx context.Context, id, items string) (any, error) {
 	}
 	return rows[0], nil
 }
-func (b *Bridge) Send(ctx context.Context, id, prompt string) (j.Object, error) {
+func (b *Bridge) Send(ctx context.Context, id, prompt string, model, thinking any) (j.Object, error) {
 	if err := nonempty(id, "threadId", 128); err != nil {
 		return nil, err
 	}
 	if err := nonempty(prompt, "prompt", 100000); err != nil {
 		return nil, err
 	}
-	return b.mutate(ctx, j.Object{"threadId": id}, func(call callFunc, result j.Object) error {
+	return b.mutate(ctx, j.Object{"threadId": id, "settingsUpdated": false, "messageSent": false}, func(call callFunc, result j.Object) error {
 		read, err := call("thread/read", j.Object{"threadId": id})
 		if err != nil {
 			return err
 		}
 		thread := j.Map(read["thread"])
+		override := model != nil || thinking != nil
+		var selectedModel, selectedEffort string
+		if override {
+			selectedModel, selectedEffort, err = resolveModel(call, model, thinking, thread, "")
+			if err != nil {
+				return err
+			}
+		}
 		if j.Map(thread["status"])["type"] == "notLoaded" {
 			params, sandbox, err := settings.Saved(thread)
 			if err != nil {
@@ -230,8 +265,25 @@ func (b *Bridge) Send(ctx context.Context, id, prompt string) (j.Object, error) 
 			}
 			thread = j.Map(resumed["thread"])
 		}
+		if override {
+			_, err = call("thread/settings/update", j.Object{"threadId": id, "model": selectedModel, "effort": selectedEffort})
+			if err != nil {
+				var transport *rpc.TransportError
+				if errors.As(err, &transport) && transport.MayHaveBeenSent {
+					result["settingsUpdated"] = nil
+				}
+				return err
+			}
+			result["settingsUpdated"] = true
+			result["settings"] = j.Object{"model": selectedModel, "thinking": selectedEffort}
+			read, err = call("thread/read", j.Object{"threadId": id})
+			if err != nil {
+				return err
+			}
+			thread = j.Map(read["thread"])
+		}
 		if j.Map(thread["status"])["type"] == "active" {
-			v, err := b.latest(ctx, id, "summary")
+			v, err := latest(call, id, "summary")
 			if err != nil {
 				return err
 			}
@@ -240,6 +292,7 @@ func (b *Bridge) Send(ctx context.Context, id, prompt string) (j.Object, error) 
 				return settings.Fail("Task changed while reading it; message was not sent")
 			}
 			result["turnId"] = turn["id"]
+			result["messageSent"] = nil
 			steered, err := call("turn/steer", j.Object{"threadId": id, "expectedTurnId": turn["id"], "input": input(prompt)})
 			if err != nil {
 				return err
@@ -247,6 +300,7 @@ func (b *Bridge) Send(ctx context.Context, id, prompt string) (j.Object, error) 
 			result["turnId"] = steered["turnId"]
 			result["delivery"] = "steered"
 		} else {
+			result["messageSent"] = nil
 			started, err := call("turn/start", j.Object{"threadId": id, "input": input(prompt)})
 			if err != nil {
 				return err
@@ -254,6 +308,7 @@ func (b *Bridge) Send(ctx context.Context, id, prompt string) (j.Object, error) 
 			result["turnId"] = j.Map(started["turn"])["id"]
 			result["delivery"] = "started"
 		}
+		result["messageSent"] = true
 		return nil
 	})
 }
@@ -291,7 +346,7 @@ func (b *Bridge) Threads(ctx context.Context, limit int, cursor string, cwd any,
 	}
 	return j.Map(Clip(v, 4000, false)), nil
 }
-func (b *Bridge) Read(ctx context.Context, id string, limit int, cursor string, chars int) (j.Object, error) {
+func (b *Bridge) Read(ctx context.Context, id string, limit int, cursor string, chars int, includeOutputs bool) (j.Object, error) {
 	if err := nonempty(id, "threadId", 128); err != nil {
 		return nil, err
 	}
@@ -313,7 +368,12 @@ func (b *Bridge) Read(ctx context.Context, id string, limit int, cursor string, 
 	if err != nil {
 		return nil, err
 	}
-	return j.Map(Clip(j.Object{"thread": read["thread"], "turnsPage": page}, chars, false)), nil
+	thread := j.Map(read["thread"])
+	turns := []any{}
+	for _, value := range j.List(page["data"]) {
+		turns = append(turns, compactTurn(j.Map(value), chars, includeOutputs))
+	}
+	return j.Object{"threadId": id, "title": thread["name"], "cwd": thread["cwd"], "status": thread["status"], "turns": turns, "nextCursor": page["nextCursor"]}, nil
 }
 func (b *Bridge) Metadata(ctx context.Context, operation, id string, value any) (j.Object, error) {
 	if err := nonempty(id, "threadId", 128); err != nil {

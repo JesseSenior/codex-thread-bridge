@@ -1,7 +1,7 @@
 [
   {
     "name": "create_thread",
-    "description": "Create in an existing directory, optionally with a title and initial prompt.\n\nOmitted settings use remote server defaults. Worktree requests fail explicitly.\nKnown task IDs remain in partial failure responses. No automatic resend is safe.\n",
+    "description": "Create in an existing directory, optionally with a title and prompt. Explicit model and thinking overrides require a supported server catalog combination. Omitted settings use server defaults. Worktrees are unsupported. Partial failures retain known IDs; never automatically resend an unknown outcome.",
     "inputSchema": {
       "$defs": {
         "Environment": {
@@ -150,7 +150,8 @@
         "cwd"
       ],
       "title": "create_threadArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -165,7 +166,7 @@
   },
   {
     "name": "send_message_to_thread",
-    "description": "Start a turn when idle or steer the active turn, preserving task settings.\n\nRaces and server rejections are returned without retrying delivery. An unloaded\ntask requires verified server-owned settings; unsupported settings fail explicitly.\n",
+    "description": "Send a message, optionally saving model and thinking overrides for the next turn. Active turns are steered without interruption. Unsupported settings updates fail before message delivery. Partial successes retain known IDs; never automatically resend an unknown outcome.",
     "inputSchema": {
       "properties": {
         "threadId": {
@@ -175,6 +176,20 @@
         "prompt": {
           "title": "Prompt",
           "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "thinking": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "required": [
@@ -182,7 +197,8 @@
         "prompt"
       ],
       "title": "send_message_to_threadArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -212,7 +228,8 @@
         }
       },
       "title": "list_projectsArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -254,7 +271,8 @@
         }
       },
       "title": "list_threadsArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -296,7 +314,8 @@
         }
       },
       "title": "list_archived_threadsArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -311,7 +330,7 @@
   },
   {
     "name": "read_thread",
-    "description": "Read task state and paginated history without resuming. Truncation is marked.",
+    "description": "Read compact task history with messages, tool summaries, and optional truncated outputs. Raw reasoning is excluded. Pass nextCursor for older turns.",
     "inputSchema": {
       "properties": {
         "threadId": {
@@ -332,13 +351,18 @@
           "default": 4000,
           "title": "Maxoutputcharsperitem",
           "type": "integer"
+        },
+        "includeOutputs": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
         "threadId"
       ],
       "title": "read_threadArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -353,7 +377,7 @@
   },
   {
     "name": "wait_threads",
-    "description": "Wait for up to eight tasks; zero timeout returns an immediate snapshot.\n\nReturn completion, failure, required interaction, or timeout. Reuse each cursor\nas afterCursor, including after an MCP restart. Unchanged turn text is omitted.\nReads never resume tasks. Pending Desktop calls observed by this connection are\nreported; server approval/input flags remain visible across MCP restarts.\n",
+    "description": "Wait for completion, failure, or required interaction for up to eight tasks. Zero timeout returns a snapshot. Returns compact progress and suppresses final text already delivered through a version-2 cursor. Cursors work across bridge restarts. Commentary alone does not end a wait. Reads never resume tasks.",
     "inputSchema": {
       "$defs": {
         "WaitTarget": {
@@ -385,7 +409,7 @@
           "type": "array"
         },
         "timeoutMs": {
-          "default": 20000,
+          "default": 120000,
           "title": "Timeoutms",
           "type": "integer"
         }
@@ -394,7 +418,8 @@
         "targets"
       ],
       "title": "wait_threadsArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -426,7 +451,8 @@
         "pinned"
       ],
       "title": "set_thread_pinnedArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -458,7 +484,8 @@
         "archived"
       ],
       "title": "set_thread_archivedArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,
@@ -490,7 +517,8 @@
         "title"
       ],
       "title": "set_thread_titleArguments",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false
     },
     "outputSchema": {
       "additionalProperties": true,

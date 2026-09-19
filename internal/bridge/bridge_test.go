@@ -39,7 +39,7 @@ func create(t *testing.T, b *Bridge, a j.Object) j.Object {
 }
 func send(t *testing.T, b *Bridge, id, prompt string) j.Object {
 	t.Helper()
-	v, e := b.Send(ctx, id, prompt)
+	v, e := b.Send(ctx, id, prompt, nil, nil)
 	return must(t, v, e)
 }
 func wait(t *testing.T, b *Bridge, targets []any, ms int) j.Object {
@@ -202,11 +202,11 @@ func TestPaginationAndClipping(t *testing.T) {
 		t.Fatal("pagination")
 	}
 	send(t, b, id, "latest")
-	r, e = b.Read(ctx, id, 1, "", 100)
+	r, e = b.Read(ctx, id, 1, "", 100, false)
 	p := must(t, r, e)
-	r, e = b.Read(ctx, id, 1, j.String(j.Map(p["turnsPage"])["nextCursor"]), 100)
+	r, e = b.Read(ctx, id, 1, j.String(p["nextCursor"]), 100, false)
 	p = must(t, r, e)
-	text := j.String(j.Map(j.List(j.Map(j.List(j.Map(p["turnsPage"])["data"])[0])["items"])[0])["text"])
+	text := j.String(j.Map(j.List(j.Map(j.List(p["turns"])[0])["messages"])[0])["text"])
 	eq(t, text, strings.Repeat("界", 100)+"\n[truncated; original length 300 characters]")
 	eq(t, f.Count("thread/resume"), 0)
 }
@@ -247,8 +247,8 @@ func TestMultiWaitAndRestart(t *testing.T) {
 	for _, row := range j.List(r["threads"]) {
 		s := j.Map(row)
 		eq(t, s["unchanged"], true)
-		if _, ok := s["turn"]; ok {
-			t.Fatal("unchanged turn included")
+		if _, ok := j.Map(s["progress"])["finalText"]; ok {
+			t.Fatal("unchanged final text included")
 		}
 	}
 	f.Edit(func(f *testserver.Fake) { f.Threads[other]["status"] = j.Object{"type": "idle"} })
@@ -372,7 +372,7 @@ func TestWaitTerminalErrors(t *testing.T) {
 			id := f.Add(dir, j.Object{"turns": []any{j.Object{"id": "turn1", "status": status, "items": []any{}, "error": j.Object{"message": "stopped"}}}})
 			s := first(wait(t, b, []any{j.Object{"threadId": id}}, 0))
 			eq(t, s["outcome"], status)
-			eq(t, j.Map(j.Map(s["turn"])["error"])["message"], "stopped")
+			eq(t, j.Map(j.Map(s["progress"])["error"])["message"], "stopped")
 		})
 	}
 }
@@ -417,10 +417,9 @@ func TestPythonCursorFixtures(t *testing.T) {
 		eq(t, encoded, f["json"])
 		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(encoded)))
 		eq(t, digest, f["digest"])
-		got, e := b.decodeCursor(j.String(f["cursor"]), "thread-1")
-		if e != nil {
-			t.Fatal(e)
+		_, e := b.decodeCursor(j.String(f["cursor"]), "thread-1")
+		if e == nil {
+			t.Fatal("accepted historical cursor")
 		}
-		eq(t, got, digest)
 	}
 }

@@ -92,15 +92,15 @@ func dispatch(ctx context.Context, b *bridge.Bridge, name string, a j.Object) (j
 	case "create_thread":
 		return b.Create(ctx, a)
 	case "send_message_to_thread":
-		return b.Send(ctx, id, j.String(a["prompt"]))
+		return b.Send(ctx, id, j.String(a["prompt"]), a["model"], a["thinking"])
 	case "list_projects":
 		return b.Projects(ctx, j.Int(j.Default(a, "limit", 20)), cursor)
 	case "list_threads", "list_archived_threads":
 		return b.Threads(ctx, j.Int(j.Default(a, "limit", 20)), cursor, a["cwd"], name == "list_archived_threads")
 	case "read_thread":
-		return b.Read(ctx, id, j.Int(j.Default(a, "turnLimit", 10)), cursor, j.Int(j.Default(a, "maxOutputCharsPerItem", 4000)))
+		return b.Read(ctx, id, j.Int(j.Default(a, "turnLimit", 10)), cursor, j.Int(j.Default(a, "maxOutputCharsPerItem", 4000)), a["includeOutputs"] == true)
 	case "wait_threads":
-		return b.Wait(ctx, j.List(a["targets"]), j.Int(j.Default(a, "timeoutMs", 20000)))
+		return b.Wait(ctx, j.List(a["targets"]), j.Int(j.Default(a, "timeoutMs", 120000)))
 	case "set_thread_title":
 		return b.Metadata(ctx, "title", id, a["title"])
 	case "set_thread_pinned":
@@ -133,7 +133,7 @@ func normalizeInput(args j.Object) {
 			}
 		}
 	}
-	for _, key := range []string{"pinned", "archived"} {
+	for _, key := range []string{"pinned", "archived", "includeOutputs"} {
 		switch v := args[key].(type) {
 		case string:
 			switch strings.ToLower(v) {

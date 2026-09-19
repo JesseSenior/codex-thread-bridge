@@ -28,6 +28,9 @@ type Fake struct {
 	Threads       map[string]j.Object
 	Order         []string
 	Reject        map[string]j.Object
+	Models        []any
+	Config        j.Object
+	ModelPageSize int
 	Projects      []any
 	Complete      bool
 	Drop          string
@@ -50,6 +53,10 @@ func Start(t *testing.T) *Fake {
 		t.Fatal(err)
 	}
 	f := &Fake{Socket: filepath.Join(dir, "app.sock"), Threads: map[string]j.Object{}, Reject: map[string]j.Object{}, Complete: true, Override: j.Object{}, Projects: []any{}, Paused: make(chan struct{}, 1), Release: make(chan struct{})}
+	f.Config = j.Object{"model": "server-default", "model_reasoning_effort": "medium"}
+	for _, name := range []string{"server-default", "other", "saved-model"} {
+		f.Models = append(f.Models, j.Object{"id": name, "model": name, "isDefault": name == "server-default", "defaultReasoningEffort": "medium", "supportedReasoningEfforts": []any{j.Object{"reasoningEffort": "low"}, j.Object{"reasoningEffort": "medium"}, j.Object{"reasoningEffort": "high"}}})
+	}
 	listener, err := net.Listen("unix", f.Socket)
 	if err != nil {
 		t.Fatal(err)
@@ -152,12 +159,23 @@ func (f *Fake) dispatch(method string, p j.Object) (j.Object, *rpc.Error) {
 	if method == "initialize" {
 		return j.Object{"userAgent": "fake/0.154.0"}, nil
 	}
+	if method == "config/read" {
+		return j.Object{"config": clone(f.Config)}, nil
+	}
+	if method == "model/list" {
+		params := clone(p)
+		if f.ModelPageSize > 0 {
+			params["limit"] = f.ModelPageSize
+		}
+		return page(f.Models, params), nil
+	}
 	if method == "thread/start" {
 		id := f.add(j.String(p["cwd"]), nil)
 		out := j.Object{"thread": clone(f.Threads[id]), "cwd": p["cwd"], "model": j.Default(p, "model", "server-default"), "reasoningEffort": j.Default(j.Map(p["config"]), "model_reasoning_effort", "medium"), "sandbox": Sandbox(p), "approvalPolicy": j.Default(p, "approvalPolicy", "on-request")}
 		if v, ok := p["permissions"]; ok {
 			out["activePermissionProfile"] = j.Object{"id": v}
 		}
+		f.Threads[id]["model"], f.Threads[id]["reasoningEffort"] = out["model"], out["reasoningEffort"]
 		return out, nil
 	}
 	if method == "project/list" {
@@ -184,6 +202,14 @@ func (f *Fake) dispatch(method string, p j.Object) (j.Object, *rpc.Error) {
 		return nil, &rpc.Error{Method: method, Data: j.Object{"code": -32602, "message": "task does not exist"}}
 	}
 	switch method {
+	case "thread/settings/update":
+		if p["model"] != nil {
+			thread["model"] = p["model"]
+		}
+		if p["effort"] != nil {
+			thread["reasoningEffort"] = p["effort"]
+		}
+		return j.Object{}, nil
 	case "thread/read":
 		row := clone(thread)
 		row["turns"] = []any{}
@@ -197,6 +223,7 @@ func (f *Fake) dispatch(method string, p j.Object) (j.Object, *rpc.Error) {
 		return page(rows, p), nil
 	case "thread/resume":
 		thread["status"] = j.Object{"type": "idle"}
+		thread["model"], thread["reasoningEffort"] = p["model"], j.Map(p["config"])["model_reasoning_effort"]
 		out := j.Object{"thread": clone(thread), "cwd": thread["cwd"], "sandbox": Sandbox(p), "approvalPolicy": p["approvalPolicy"], "model": p["model"], "reasoningEffort": j.Map(p["config"])["model_reasoning_effort"], "runtimeWorkspaceRoots": j.Default(p, "runtimeWorkspaceRoots", []any{}), "approvalsReviewer": p["approvalsReviewer"], "activePermissionProfile": nil}
 		if p["permissions"] != nil {
 			out["activePermissionProfile"] = j.Object{"id": p["permissions"]}
@@ -214,7 +241,7 @@ func (f *Fake) dispatch(method string, p j.Object) (j.Object, *rpc.Error) {
 		if !f.Complete {
 			status, state = "inProgress", "active"
 		}
-		turn := j.Object{"id": fmt.Sprintf("turn-%d", len(turns)+1), "status": status, "items": []any{j.Object{"type": "agentMessage", "text": j.Map(j.List(p["input"])[0])["text"]}}}
+		turn := j.Object{"id": fmt.Sprintf("turn-%d", len(turns)+1), "status": status, "model": thread["model"], "effort": thread["reasoningEffort"], "items": []any{j.Object{"type": "agentMessage", "text": j.Map(j.List(p["input"])[0])["text"]}}}
 		thread["turns"] = append(turns, turn)
 		thread["status"] = j.Object{"type": state}
 		return j.Object{"turn": clone(turn)}, nil

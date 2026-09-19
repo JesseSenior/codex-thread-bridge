@@ -96,7 +96,7 @@ func TestStdioInventoryAndWorktree(t *testing.T) {
 	if e = j.Decode(raw, &got); e != nil {
 		t.Fatal(e)
 	}
-	if e = j.Decode(referenceTools, &want); e != nil {
+	if e = j.Decode(toolData, &want); e != nil {
 		t.Fatal(e)
 	}
 	sort.Slice(got, func(i, k int) bool { return j.String(got[i]["name"]) < j.String(got[k]["name"]) })
@@ -106,7 +106,7 @@ func TestStdioInventoryAndWorktree(t *testing.T) {
 		j.Map(tool["annotations"])["idempotentHint"] = false
 	}
 	if !j.Equal(got, want) {
-		t.Fatal("tool schemas differ from the Python reference")
+		t.Fatal("tool schemas differ from the current contract")
 	}
 	if f.Count("initialize") != 0 {
 		t.Fatal("connected before tool use")
@@ -137,8 +137,8 @@ func TestStdioLifecycleAndRestart(t *testing.T) {
 	id := created["threadId"]
 	tool(t, s, "send_message_to_thread", j.Object{"threadId": id, "prompt": "second"})
 	one := tool(t, s, "read_thread", j.Object{"threadId": id, "turnLimit": 1})
-	two := tool(t, s, "read_thread", j.Object{"threadId": id, "turnLimit": 1, "cursor": j.Map(one["turnsPage"])["nextCursor"]})
-	text := j.Map(j.List(j.Map(j.List(j.Map(two["turnsPage"])["data"])[0])["items"])[0])["text"]
+	two := tool(t, s, "read_thread", j.Object{"threadId": id, "turnLimit": 1, "cursor": one["nextCursor"]})
+	text := j.Map(j.List(j.Map(j.List(two["turns"])[0])["messages"])[0])["text"]
 	if text != "first" {
 		t.Fatal(two)
 	}
@@ -170,8 +170,8 @@ func TestStdioLifecycleAndRestart(t *testing.T) {
 	if row["unchanged"] != true {
 		t.Fatal(row)
 	}
-	if _, ok := row["turn"]; ok {
-		t.Fatal("unchanged turn")
+	if _, ok := j.Map(row["progress"])["finalText"]; ok {
+		t.Fatal("unchanged final text")
 	}
 	if f.Count("thread/start") != 1 || f.Count("turn/start") != 2 {
 		t.Fatal("replayed operation")
@@ -233,6 +233,78 @@ func TestSchemaValidation(t *testing.T) {
 	}
 	if f.Count("initialize") != 0 {
 		t.Fatal("invalid input caused RPC")
+	}
+}
+
+func TestStrictCurrentContract(t *testing.T) {
+	f := testserver.Start(t)
+	s := connect(t, f, filepath.Join(t.TempDir(), "absent"))
+	cases := map[string]j.Object{
+		"create_thread":          {"cwd": t.TempDir()},
+		"send_message_to_thread": {"threadId": "task", "prompt": "hello"},
+		"list_projects":          {}, "list_threads": {}, "list_archived_threads": {},
+		"read_thread":         {"threadId": "task"},
+		"wait_threads":        {"targets": []any{j.Object{"threadId": "task"}}},
+		"set_thread_pinned":   {"threadId": "task", "pinned": true},
+		"set_thread_archived": {"threadId": "task", "archived": true},
+		"set_thread_title":    {"threadId": "task", "title": "Title"},
+	}
+	for name, args := range cases {
+		args["extra"] = "ignored before validation became strict"
+		r, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil || !r.IsError {
+			t.Fatalf("%s accepted unknown input: %v", name, err)
+		}
+	}
+	if f.Count("initialize") != 0 {
+		t.Fatal("invalid input contacted server")
+	}
+	var contracts []j.Object
+	if err := j.Decode(toolData, &contracts); err != nil {
+		t.Fatal(err)
+	}
+	if len(contracts) != 10 {
+		t.Fatal("tool inventory changed")
+	}
+	for _, tool := range contracts {
+		props := j.Map(j.Map(tool["inputSchema"])["properties"])
+		switch tool["name"] {
+		case "wait_threads":
+			if j.Int(j.Map(props["timeoutMs"])["default"]) != 120000 {
+				t.Fatal("incorrect default timeout")
+			}
+		case "send_message_to_thread":
+			if props["model"] == nil || props["thinking"] == nil {
+				t.Fatal("missing follow-up overrides")
+			}
+		case "read_thread":
+			if j.Map(props["includeOutputs"])["default"] != false {
+				t.Fatal("outputs enabled by default")
+			}
+		}
+	}
+}
+
+func TestStdioOverridesAndOutputSelection(t *testing.T) {
+	f := testserver.Start(t)
+	s := connect(t, f, filepath.Join(t.TempDir(), "absent"))
+	r := tool(t, s, "create_thread", j.Object{"cwd": t.TempDir(), "model": "other", "thinking": "low"})
+	id := r["threadId"]
+	r = tool(t, s, "send_message_to_thread", j.Object{"threadId": id, "prompt": "next", "thinking": "high"})
+	if !j.Equal(r["settings"], j.Object{"model": "other", "thinking": "high"}) {
+		t.Fatal(r)
+	}
+	f.Edit(func(f *testserver.Fake) {
+		turn := j.Map(j.List(f.Threads[j.String(id)]["turns"])[0])
+		turn["items"] = append(j.List(turn["items"]), j.Object{"type": "commandExecution", "command": "test", "aggregatedOutput": "result"})
+	})
+	for _, output := range []any{false, "yes"} {
+		r = tool(t, s, "read_thread", j.Object{"threadId": id, "includeOutputs": output})
+		turn := j.Map(j.List(r["turns"])[0])
+		entry := j.Map(j.List(turn["tools"])[0])
+		if (entry["output"] != nil) != (output == "yes") {
+			t.Fatal(r)
+		}
 	}
 }
 

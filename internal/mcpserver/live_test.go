@@ -36,7 +36,7 @@ func TestLiveReadOnly(t *testing.T) {
 	if len(rows) > 0 {
 		id := j.Map(rows[0])["id"]
 		read := tool(t, session, "read_thread", j.Object{"threadId": id, "turnLimit": 1})
-		if j.Map(read["thread"])["id"] != id {
+		if read["threadId"] != id {
 			t.Fatal("read returned another task")
 		}
 		tool(t, session, "wait_threads", j.Object{"targets": []any{j.Object{"threadId": id}}, "timeoutMs": 0})

@@ -74,7 +74,40 @@ Use `read_thread` to read the result, or `wait_threads` to wait:
 {"targets": [{"threadId": "TASK_ID"}], "timeoutMs": 20000}
 ```
 
-If an operation returns `outcome_unknown`, inspect the task before sending it again.
+`create_thread` and `send_message_to_thread` accept optional `model` and
+`thinking` values. Explicit overrides must match the App Server model catalog.
+Omitted settings retain server defaults on creation or saved task settings on
+follow-up. If the effective combination cannot be checked, the request fails
+before a change.
+
+Follow-up overrides are saved through `thread/settings/update`. A running turn
+receives the message through steering and keeps its current settings. The next
+turn uses the saved settings. An idle task starts its next turn immediately.
+Servers without settings-update support cannot accept follow-up overrides.
+
+Follow-up results include `settingsUpdated` and `messageSent`: `true` means
+confirmed, `false` means not applied or not sent, and `null` means unknown.
+Settings can be saved even if message delivery fails. If an operation returns
+`outcome_unknown`, inspect the task before sending it again.
+
+`read_thread` returns `threadId`, `title`, `cwd`, `status`, `turns`, and
+`nextCursor`. Each turn contains `id`, `status`, `messages`, `tools`, and an error
+when present. Messages have a role and text; tools have identity, type, status,
+and available command or tool details. Set `includeOutputs: true` to add tool
+and command outputs. Outputs are excluded by default; raw reasoning is excluded
+in both modes. `maxOutputCharsPerItem` limits displayed text (default 4000).
+
+`wait_threads` returns `threads`, `errors`, and `timedOut`. Each task contains
+status, outcome, pending interaction methods, and compact `progress` with the
+turn ID/status, latest commentary, final text, and error when available. The
+default timeout is 120000 ms; use zero for an immediate snapshot. Commentary
+alone does not end a wait. Pass a returned cursor as `afterCursor` to suppress
+previously delivered final text. Version-2 cursors remain valid across bridge
+restarts and are specific to the server socket and task. Other cursor versions
+are rejected.
+
+All tools reject unknown input fields. Existing directory filters, pagination,
+and creation permission options remain available.
 
 To remove:
 

@@ -28,10 +28,11 @@ submitting a change and `./scripts/test-binary.sh` for binary or transport chang
 Release builds must use `CGO_ENABLED=0`, Linux amd64, and baseline `GOAMD64=v1`.
 
 The JSON fixtures under the MCP and bridge test directories were captured from
-Python 0.2.0 before the migration. Keep them as compatibility references. The Go
+Python 0.2.0 before the migration. Keep these historical captures unchanged. Test the current API contract separately. The Go
 SDK emits the default `idempotentHint: false` explicitly; this is equivalent to
 the omitted Python hint. Tool validation must retain the supported Python scalar
-conversions. Wait hashes use Python-compatible sorted JSON with ASCII escaping.
+conversions. Version-2 wait cursors use Python-compatible sorted JSON with ASCII escaping.
+They track event state and delivered final text without a bridge database.
 
 The installer tests use mock downloads and an isolated Codex configuration. Do
 not use the real user configuration in tests. Release checks do not create tags

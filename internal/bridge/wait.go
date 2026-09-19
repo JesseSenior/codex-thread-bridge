@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	j "github.com/JesseSenior/codex-thread-bridge/internal/jsonutil"
@@ -27,38 +28,48 @@ func resolvedPath(path string) string {
 	return filepath.Join(resolvedPath(parent), filepath.Base(absolute))
 }
 func (b *Bridge) scope(id string) j.Object {
-	return j.Object{"v": 1, "host": resolvedPath(b.RPC.Socket), "threadId": id}
+	return j.Object{"v": 2, "host": resolvedPath(b.RPC.Socket), "threadId": id}
 }
-func (b *Bridge) decodeCursor(cursor, id string) (string, error) {
-	fail := errors.New("Invalid wait cursor for this host or task")
+func (b *Bridge) decodeCursor(cursor, id string) (j.Object, error) {
+	fail := errors.New("Invalid wait cursor: require version 2 for this host and task")
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", fail
+		return nil, fail
 	}
 	var v j.Object
-	if j.Decode(raw, &v) != nil || v == nil {
-		return "", fail
+	if j.Decode(raw, &v) != nil || len(v) != 6 {
+		return nil, fail
 	}
 	for k, want := range b.scope(id) {
 		if !j.Equal(v[k], want) {
-			return "", fail
+			return nil, fail
 		}
 	}
-	digest, ok := v["digest"].(string)
-	if !ok {
-		return "", fail
+	for _, key := range []string{"digest", "event", "final"} {
+		value, ok := v[key].(string)
+		if !ok {
+			return nil, fail
+		}
+		if key == "final" && value == "" {
+			continue
+		}
+		decoded, err := hex.DecodeString(value)
+		if err != nil || len(decoded) != sha256.Size {
+			return nil, fail
+		}
 	}
-	return digest, nil
+	return v, nil
 }
-func (b *Bridge) snapshot(ctx context.Context, id string) (j.Object, string, error) {
+func digest(v any) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(j.PythonJSON(v)))) }
+func (b *Bridge) snapshot(ctx context.Context, id string) (j.Object, j.Object, error) {
 	read, err := b.RPC.Call(ctx, "thread/read", j.Object{"threadId": id})
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	thread := j.Map(read["thread"])
 	turn, err := b.latest(ctx, id, "full")
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	status := j.Map(thread["status"])
 	flags := j.List(status["activeFlags"])
@@ -94,12 +105,23 @@ func (b *Bridge) snapshot(ctx context.Context, id string) (j.Object, string, err
 	for i, v := range pending {
 		p[i] = v
 	}
-	snapshot := j.Map(Clip(j.Object{"threadId": id, "outcome": outcome, "status": status, "turn": turn, "pendingMethods": p}, 4000, false))
-	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(j.PythonJSON(snapshot))))
+	progress, finalText := progress(j.Map(turn))
+	snapshot := j.Object{"threadId": id, "outcome": outcome, "status": status, "progress": progress, "pendingMethods": p}
 	scope := b.scope(id)
-	scope["digest"] = digest
-	snapshot["cursor"] = base64.URLEncoding.EncodeToString([]byte(j.PythonJSON(scope)))
-	return snapshot, digest, nil
+	scope["digest"] = digest(snapshot)
+	interactionFlags := []string{}
+	for _, flag := range flags {
+		if flag == "waitingOnApproval" || flag == "waitingOnUserInput" {
+			interactionFlags = append(interactionFlags, j.String(flag))
+		}
+	}
+	sort.Strings(interactionFlags)
+	scope["event"] = digest(j.Object{"outcome": outcome, "turnId": progress["turnId"], "turnStatus": ts, "error": progress["error"], "pendingMethods": p, "flags": interactionFlags})
+	scope["final"] = ""
+	if finalText != "" {
+		scope["final"] = digest(j.Object{"turnId": progress["turnId"], "text": finalText})
+	}
+	return snapshot, scope, nil
 }
 func (b *Bridge) Wait(ctx context.Context, targets []any, timeout int) (j.Object, error) {
 	if len(targets) < 1 || len(targets) > 8 {
@@ -108,7 +130,7 @@ func (b *Bridge) Wait(ctx context.Context, targets []any, timeout int) (j.Object
 	if timeout < 0 || timeout > 120000 {
 		return nil, errors.New("timeoutMs must be between 0 and 120000")
 	}
-	cursors := map[string]string{}
+	cursors := map[string]j.Object{}
 	ids := make([]string, len(targets))
 	seen := map[string]bool{}
 	for i, v := range targets {
@@ -134,7 +156,7 @@ func (b *Bridge) Wait(ctx context.Context, targets []any, timeout int) (j.Object
 	for {
 		type item struct {
 			s j.Object
-			d string
+			d j.Object
 			e error
 		}
 		results := make([]item, len(ids))
@@ -156,13 +178,19 @@ func (b *Bridge) Wait(ctx context.Context, targets []any, timeout int) (j.Object
 				errs = append(errs, e)
 				continue
 			}
-			unchanged := cursors[ids[i]] == r.d
-			if unchanged {
-				delete(r.s, "turn")
+			previous := cursors[ids[i]]
+			finalChanged := r.d["final"] != "" && !j.Equal(previous["final"], r.d["final"])
+			unchanged := j.Equal(previous["digest"], r.d["digest"]) && !finalChanged
+			if !finalChanged {
+				delete(j.Map(r.s["progress"]), "finalText")
 			}
+			if r.d["final"] == "" && previous["final"] != nil {
+				r.d["final"] = previous["final"]
+			}
+			r.s["cursor"] = base64.URLEncoding.EncodeToString([]byte(j.PythonJSON(r.d)))
 			r.s["unchanged"] = unchanged
 			snapshots = append(snapshots, r.s)
-			ready = ready || (!unchanged && r.s["outcome"] != "running")
+			ready = ready || (r.s["outcome"] != "running" && (!j.Equal(previous["event"], r.d["event"]) || finalChanged))
 		}
 		remaining := time.Until(end)
 		if ready || len(errs) > 0 || remaining <= 0 {
