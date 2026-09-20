@@ -3,6 +3,7 @@ package bridge
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	j "github.com/JesseSenior/codex-thread-bridge/internal/jsonutil"
@@ -296,6 +297,7 @@ func (b *Bridge) Send(ctx context.Context, id, prompt string, model, thinking an
 			result["turnId"] = turn["id"]
 			result["messageSent"] = nil
 			params := b.messageInput(prompt, source, "send_message_to_thread", true)
+			params["clientUserMessageId"] = rand.Text()
 			params["threadId"], params["expectedTurnId"] = id, turn["id"]
 			steered, err := call("turn/steer", params)
 			if err != nil {

@@ -265,7 +265,7 @@ func (f *Fake) dispatch(method string, p j.Object) (j.Object, *rpc.Error) {
 			return nil, &rpc.Error{Method: method, Data: j.Object{"code": -32600, "message": "turn no longer active"}}
 		}
 		turn := j.Map(turns[len(turns)-1])
-		turn["items"] = append(j.List(turn["items"]), j.Object{"id": "steered", "type": "userMessage", "content": p["input"]})
+		turn["items"] = append(j.List(turn["items"]), j.Object{"id": "steered", "type": "userMessage", "clientId": p["clientUserMessageId"], "content": p["input"]})
 		return j.Object{"turnId": p["expectedTurnId"]}, nil
 	case "thread/name/set":
 		thread["name"] = p["name"]

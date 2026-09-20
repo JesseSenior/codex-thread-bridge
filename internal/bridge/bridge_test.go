@@ -114,6 +114,42 @@ func TestIdleStartRace(t *testing.T) {
 	eq(t, f.Count("turn/start"), 1)
 	eq(t, f.Count("turn/steer"), 0)
 }
+
+func TestSteeringMessageIdentity(t *testing.T) {
+	b, f, dir := setup(t)
+	f.Edit(func(f *testserver.Fake) { f.Complete = false })
+	id := j.String(create(t, b, j.Object{"cwd": dir, "prompt": "start"})["threadId"])
+	seen := map[string]bool{}
+	for _, source := range []string{"", "source-peer", "source-peer"} {
+		prompt := "  Follow-up <&>\n"
+		r, err := b.Send(ctx, id, prompt, nil, nil, source)
+		eq(t, must(t, r, err)["delivery"], "steered")
+		var params j.Object
+		f.Edit(func(f *testserver.Fake) {
+			for _, call := range f.Calls {
+				if call.Method == "turn/steer" {
+					params = call.Params
+				}
+			}
+		})
+		clientID := j.String(params["clientUserMessageId"])
+		if clientID == "" || seen[clientID] {
+			t.Fatal("missing or reused client message ID")
+		}
+		seen[clientID] = true
+		if source != "" {
+			prompt = delegationText(source, prompt)
+		}
+		eq(t, params["input"], input(prompt))
+		turn := j.Map(j.List(f.Thread(id)["turns"])[0])
+		items := j.List(turn["items"])
+		message := j.Map(items[len(items)-1])
+		eq(t, message["clientId"], clientID)
+		eq(t, message["content"], params["input"])
+	}
+	eq(t, f.Params("turn/start")["clientUserMessageId"], nil)
+	eq(t, f.Count("turn/steer"), 3)
+}
 func TestCreationResponseLoss(t *testing.T) {
 	for _, method := range []string{"thread/start", "thread/name/set", "turn/start"} {
 		t.Run(method, func(t *testing.T) {

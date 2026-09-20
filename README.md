@@ -86,6 +86,10 @@ Attributed turn starts use native tool output on servers at or above
 Desktop text wrapper. The bridge selects the format before delivery and never
 retries a message with another format after failure.
 
+Active-turn messages include a unique client message ID so Desktop can display
+them as accepted messages. Version 0.3.2 fixes missing message bubbles for new
+bridge messages; it does not restore messages sent by older versions.
+
 `create_thread` and `send_message_to_thread` accept optional `model` and
 `thinking` values. Explicit overrides must match the App Server model catalog.
 Omitted settings retain server defaults on creation or saved task settings on
